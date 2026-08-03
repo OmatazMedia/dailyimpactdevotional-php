@@ -1,0 +1,6 @@
+{
+  "name": "Daily Impact Devotional",
+  "description": "A responsive Daily Devotional web application featuring a beautiful light/dark theme switcher, interactive lists, and the ability to add and navigate daily devotionals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

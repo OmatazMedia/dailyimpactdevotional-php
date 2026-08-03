@@ -1,0 +1,74 @@
+[
+  {
+    "id": "mrthkar4shque",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-20T17:15:52.816Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mrtm5dpfsbul4",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-20T19:24:14.883Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.3.6 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mrtmr7muaqo6m",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-20T19:41:13.446Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.3.6 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mrusyrrskk4ro",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-21T15:22:50.009Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mrxzrm1nui163",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-23T20:56:31.835Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mry0pewe0a7p9",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-23T21:22:48.878Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mry10mhy1t905",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-23T21:31:31.942Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  },
+  {
+    "id": "mry1j8smnps3i",
+    "email": "admin@ministries.org",
+    "timestamp": "2026-07-23T21:46:00.646Z",
+    "ip": "::1",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "success": true,
+    "location": "Localhost / Local network"
+  }
+]

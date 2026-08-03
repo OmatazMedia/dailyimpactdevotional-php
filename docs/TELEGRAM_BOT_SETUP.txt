@@ -1,0 +1,367 @@
+================================================================================
+  DAILY IMPACT DEVOTIONAL — TELEGRAM BOT SETUP GUIDE
+  Step-by-step directions to auto-post daily devotionals to your Telegram channel
+================================================================================
+
+This guide walks you through setting up a Telegram Bot that automatically posts
+the daily devotional (with its header image) to your Telegram channel at a
+scheduled time each day.
+
+Your project already contains the full integration code. There is NO PHP or
+MySQL to set up — the Node.js server (server.ts) handles everything:
+  - It stores your bot token and channel ID in the Settings panel.
+  - It runs a built-in scheduler (ticks every 30 seconds).
+  - It sends the devotional + image via the Telegram Bot API.
+  - It keeps a log of every post in src/data/telegram_log.json.
+
+You just need to:
+  1. Create a Telegram bot and copy its token.
+  2. Add the bot as an admin of your channel.
+  3. Paste the token + channel ID into the Dashboard.
+  4. Pick a daily post time and turn the scheduler on.
+
+Follow the steps below in order.
+
+
+================================================================================
+  STEP 1 — CREATE THE TELEGRAM BOT (one time)
+================================================================================
+
+1. Open the Telegram app (phone or desktop).
+
+2. In the search bar, type:  @BotFather
+   - Tap the account that has a blue verified checkmark.
+   - It is Telegram's official bot-creation account.
+
+3. Press Start, then send this exact message:
+
+       /newbot
+
+4. BotFather will ask for a DISPLAY NAME for your bot.
+   Type something like:
+
+       Daily Impact Devotional
+
+   (This is the friendly name people see. You can change it later.)
+
+5. BotFather will ask for a USERNAME. It must:
+   - End with the word "bot"
+   - Be unique across all of Telegram
+   - Use only letters, numbers and underscores
+
+   Example:
+
+       DailyImpactDevotionalBot
+
+   If the name is taken, try variations:
+       DailyImpactDevotional_Bot
+       DIDevotionalBot
+       DID_Official_Bot
+
+6. BotFather will reply with a long message. Inside it you will see a line
+   that looks like this:
+
+       HTTP API Token:
+       1234567890:AAH-abcdefGHIjklmNOPQrstuvWXYZ1234567
+
+   >>> COPY THAT ENTIRE TOKEN. <<<
+   This is your BOT TOKEN. Treat it like a password — anyone who has it can
+   post on your channel. Do NOT share it, do NOT commit it to Git.
+
+   Paste it somewhere safe for now (a password manager, a sticky note, etc.).
+   You will paste it into the Dashboard in Step 4.
+
+
+================================================================================
+  STEP 2 — CREATE YOUR TELEGRAM CHANNEL (skip if you already have one)
+================================================================================
+
+Your channel is where the devotionals will be posted publicly.
+
+1. In Telegram, tap the pencil/menu icon and choose "New Channel".
+
+2. Give it a name, e.g.:
+       Daily Impact Devotional
+
+3. Add a short description and a profile picture if you like.
+
+4. Choose the channel type:
+       - Public Channel  -> gets a t.me/yourlink address (recommended)
+       - Private Channel -> members join only by invite link
+
+5. You now have a channel. Leave it open and continue.
+
+
+================================================================================
+  STEP 3 — ADD THE BOT AS AN ADMINISTRATOR OF YOUR CHANNEL
+================================================================================
+
+This is the step most people miss. The bot CANNOT post unless it is an admin.
+
+1. Open your channel.
+
+2. Tap the channel name at the top -> open "Administrators" (or
+   "Manage Channel" -> "Administrators").
+
+3. Tap "Add Administrator".
+
+4. In the search box, type your bot's username exactly, e.g.:
+       @DailyImpactDevotionalBot
+
+   - If it does not appear, your bot's privacy setting may be on. Try
+     searching the username letter-by-letter. Bots show up in admin search.
+
+5. Tap the bot, then tap the checkmark / "Add".
+
+6. IMPORTANT — when the permissions screen appears, make sure these are ON:
+       - Post Messages        (REQUIRED)
+       - Edit Messages of Others
+       - Send Photos / Media   (REQUIRED)
+
+   You can leave the other permissions off.
+
+7. Save / confirm.
+
+Your bot is now an admin and can post to the channel.
+
+
+================================================================================
+  STEP 4 — GET YOUR CHANNEL ID
+================================================================================
+
+The bot needs a target to post to. Telegram calls this the "chat_id".
+For a channel it almost always begins with an "@" symbol.
+
+  IF YOUR CHANNEL IS PUBLIC:
+     The Channel ID is simply your channel's @username.
+     Example:   @dailyimpactdevotional
+     (You can copy it from the channel header at the top of Telegram.)
+
+  IF YOUR CHANNEL IS PRIVATE:
+     The Channel ID is a negative number that looks like:
+        -1001234567890
+     To find it, do one of these:
+
+     Option A — Use @userinfobot:
+        1. Open Telegram, search for:  @userinfobot
+        2. Forward any message from your channel into that bot.
+        3. It replies with the channel's numeric ID (starts with -100).
+
+     Option B — Use the Verify button (covered in Step 6):
+        The Dashboard has a "Verify Connection" button. If you can guess
+        your channel ID, paste it and click Verify — it will tell you if
+        the bot can reach the channel and will print the real channel title.
+
+Write down your Channel ID. You will paste it in Step 6.
+
+
+================================================================================
+  STEP 5 — START THE LOCAL SERVER
+================================================================================
+
+The scheduler lives in your Node server, so it must be running.
+
+1. Open a terminal in this project folder.
+
+2. Install dependencies (only the first time):
+       npm install
+
+3. Start BOTH the API server and the Vite dev server together:
+       npm run dev:full
+
+   (This runs server.ts, which starts the API on port 3001 and arms the
+    Telegram scheduler. Keep this terminal window open the whole time you
+    want auto-posting to work.)
+
+4. You should see this in the terminal:
+       ✅ Daily Impact API server running at http://localhost:3001
+       ⏱  Telegram scheduler armed — checks every 30 seconds.
+
+   If you only run "npm run dev" (Vite only), the scheduler is NOT running
+   and nothing will be posted. Always use "npm run dev:full".
+
+
+================================================================================
+  STEP 6 — ENTER THE CREDENTIALS IN THE DASHBOARD
+================================================================================
+
+1. Open the app in your browser (usually http://localhost:3000).
+
+2. Log in as admin and open the Dashboard.
+
+3. In the left sidebar, click "Telegram Channel".
+
+4. Fill in the fields exactly:
+
+       Bot Token            -> paste the token from Step 1
+                                (e.g. 1234567890:AAH-abcDEF...)
+
+       Channel ID           -> paste your @username or numeric ID from Step 4
+                                (e.g. @dailyimpactdevotional  OR  -1001234567890)
+
+       Auto-post Time       -> the time of day to post, 24-hour format
+                                e.g. 06:00  =  6:00 AM
+                                     18:30  =  6:30 PM
+
+       Footer Text          -> optional signature shown at the bottom of every
+                                post. Default:
+                                "Join our Telegram channel for daily impact
+                                 words! [read more] dailyimpactdevotional.org"
+
+5. Click SAVE SETTINGS. The values are written to src/data/settings.json.
+
+6. Click VERIFY CONNECTION. This:
+       - Calls Telegram's getMe to confirm the bot token is valid.
+       - Calls Telegram's getChat to confirm the bot can see the channel.
+   You should see a green check with the bot's name and the channel's title.
+
+   If it FAILS, common reasons:
+       - "Not Found" / "chat not found" -> wrong Channel ID, or the bot
+         is not an admin of the channel (re-do Step 3).
+       - "Unauthorized"                  -> wrong/typo in the Bot Token.
+       - Connection error                -> the server is not running, or
+         there is no internet.
+
+
+================================================================================
+  STEP 7 — TURN THE SCHEDULER ON AND TEST
+================================================================================
+
+1. In the same Telegram panel, toggle:
+       Enable Automatic Daily Posting   ->  ON
+
+2. Click SAVE SETTINGS again.
+
+3. (Recommended) Test right now without waiting for the scheduled time:
+       Find the "Send Now" / "Post Test Message" button and click it.
+   This immediately posts today's devotional to your channel.
+
+   - If it works, you will see a success toast and a real message appear
+     in your Telegram channel with the devotional header image and text.
+   - The server terminal will log:
+        [Telegram] Manual send triggered...
+        [Telegram] Sent successfully. Message ID: ...
+
+4. If Send Now fails, check the server terminal — the exact Telegram error
+   is printed there (e.g. "chat not found", "caption is too long", etc.).
+
+
+================================================================================
+  STEP 8 — HOW THE AUTOMATIC DAILY POST WORKS
+================================================================================
+
+You do NOT need to set up a cron job. The Node server does it for you.
+
+Every 30 seconds, the scheduler inside server.ts checks:
+
+   (a) Is Telegram enabled?                (telegram_enabled === "true")
+   (b) Are token + channel ID present?
+   (c) What is the current time in your admin timezone?
+       (default Africa/Lagos, set in Settings -> admin_timezone)
+   (d) Does the current minute match your post time (e.g. 06:00)?
+
+   If YES to all four, it:
+       1. Looks for a devotional whose "date" = today's month + day
+          and whose "year" = today's year  (e.g. "July 20", 2026).
+       2. Checks the log (src/data/telegram_log.json) to make sure it has
+          not already posted that devotional today.
+       3. Sends the devotional + its header image via Telegram sendPhoto.
+          If the caption is too long, it automatically falls back to
+          sendMessage (text only) so the post still goes out.
+       4. Writes a record to telegram_log.json.
+
+So as long as:
+       - the server is running (npm run dev:full),
+       - Telegram is enabled,
+       - today's devotional exists with a matching date + year,
+   the post will fire automatically at your chosen time every day.
+
+
+================================================================================
+  TROUBLESHOOTING
+================================================================================
+
+PROBLEM: Nothing posts at the scheduled time.
+  CHECK:
+    - Is "npm run dev:full" still running in a terminal?
+      (The scheduler only runs while the server is up.)
+    - Is "Enable Automatic Daily Posting" toggled ON and saved?
+    - Does today's devotional exist with the right "date" + "year"?
+      Open src/data/devotionals.json and confirm an entry like:
+        "date": "July 20",  "year": 2026
+    - Is admin_timezone set correctly in Settings?
+      The scheduler fires at your post time IN THAT TIMEZONE.
+    - Look in the server terminal for one of these lines:
+        [Telegram Scheduler] Already sent "..." today — skipping.
+        [Telegram Scheduler] No devotional found for July 20, 2026 — skipping.
+        [Telegram Scheduler] Posted! Message ID: ...
+      That tells you exactly which condition was hit.
+
+PROBLEM: "Verify Connection" says chat not found.
+  -> The Channel ID is wrong, OR the bot is not an admin. Redo Step 3.
+  -> For private channels, make sure you used the -100... numeric ID,
+     not the invite link.
+
+PROBLEM: Bot token rejected / Unauthorized.
+  -> Re-copy the FULL token from @BotFather (Step 1). Tokens contain a
+     colon ":" and are about 46 characters. No spaces.
+
+PROBLEM: Post goes out but has no image.
+  -> The devotional has no header image uploaded, OR the image URL is a
+     data URL (base64) which Telegram rejects. Upload a header image in
+     Dashboard -> Devotional -> Header Images first. The server falls back
+     to a text-only message if the image fails.
+
+PROBLEM: I want to post to a different channel.
+  -> Create the new channel, add the bot as admin (Step 3), get its ID,
+     paste it into the Dashboard, click Verify, then Save.
+
+PROBLEM: I lost my bot token.
+  -> Open @BotFather, send  /mybot , pick your bot, choose "API Token".
+     BotFather shows it again (or issues a new one via "Revoke current
+     token" — note: revoking makes the old token stop working).
+
+
+================================================================================
+  QUICK REFERENCE — WHERE THINGS LIVE IN THE CODE
+================================================================================
+
+  - Bot credentials & schedule settings are stored in:
+        src/data/settings.json
+    Keys: telegram_enabled, telegram_bot_token, telegram_channel_id,
+          telegram_post_time, telegram_footer_text, admin_timezone
+
+  - The Dashboard panel that lets you enter them:
+        src/components/Dashboard.tsx   (sidebar -> "Telegram Channel")
+    Fields: telegramBotToken, telegramChannelId, telegramEnabled,
+            telegramPostTime, telegramFooterText, telegramScheduleMode
+
+  - The sending + scheduling logic:
+        server.ts
+    Functions / routes:
+        buildTelegramCaption(...)    builds the post text + image
+        sendToTelegram(...)          calls Telegram sendPhoto / sendMessage
+        POST /api/telegram/verify    tests bot + channel access
+        POST /api/telegram/send-now  posts immediately (manual test)
+        GET  /api/telegram/log       returns the post history
+        runTelegramScheduler()       ticks every 30s, fires at post time
+
+  - Log of every post (success or failure):
+        src/data/telegram_log.json
+
+
+================================================================================
+  DAILY CHECKLIST (once it is set up)
+================================================================================
+
+   [ ] Server running?            -> npm run dev:full
+   [ ] Telegram enabled in panel? -> toggle ON, click Save
+   [ ] Today's devotional exists? -> matching date + year in devotionals.json
+   [ ] Header image uploaded?     -> Dashboard -> Devotional -> Header Images
+   [ ] Check the log              -> Dashboard -> Telegram Channel -> view log
+                                    (or read src/data/telegram_log.json)
+
+
+================================================================================
+  END OF GUIDE
+================================================================================

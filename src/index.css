@@ -1,0 +1,188 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-serif: "Playfair Display", Georgia, serif;
+  
+  --color-gold-50: #fffbeb;
+  --color-gold-100: #fef3c7;
+  --color-gold-200: #fde68a;
+  --color-gold-500: #f59e0b;
+  --color-gold-600: #d97706;
+  --color-gold-700: #b45309;
+  --color-teal-brand: #0d9488;
+}
+
+/* Base custom styles to support smooth theme transitions */
+body {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Hide the scrollbar while keeping the element scrollable (mouse wheel and
+   touch still work). Used on the Dashboard sidebar menu and other tight
+   vertical lists where a visible bar would clutter the UI. */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE / legacy Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome / Safari / modern Edge */
+}
+
+/* Custom shadow effects for card outlines */
+.custom-shadow {
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 8px -1px rgba(0, 0, 0, 0.03);
+}
+
+.custom-shadow-dark {
+  box-shadow: 0 4px 24px -2px rgba(0, 0, 0, 0.3), 0 2px 12px -1px rgba(0, 0, 0, 0.2);
+}
+
+/* ── Devotional rich-text containment ──────────────────────────────────────
+   Imported DOCX/HTML content can contain long unbroken words, wide images,
+   tables or <pre> blocks that would otherwise overflow the devotional card
+   and push a horizontal scrollbar onto the page. Constrain every descendant
+   to the card width and wrap text instead. */
+article[id^="devotional-content-wrapper"] {
+  overflow: hidden;
+  min-width: 0;
+}
+
+section[id^="devotional-body"] {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+section[id^="devotional-body"] img,
+section[id^="devotional-body"] iframe,
+section[id^="devotional-body"] video,
+section[id^="devotional-body"] table {
+  max-width: 100% !important;
+  height: auto;
+}
+
+section[id^="devotional-body"] pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+section[id^="devotional-body"] a {
+  overflow-wrap: anywhere;
+}
+
+/* ── Foreword WYSIWYG editor (Quill) ──────────────────────────────────────
+   The Quill editor is mounted inside ManageForeword. These rules restyle the
+   snow theme to match the app's cards and support dark mode. */
+.ql-toolbar.ql-snow {
+  border: none !important;
+  padding: 0;
+  background: transparent;
+}
+
+.ql-container.ql-snow {
+  border: none !important;
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+.ql-editor {
+  min-height: 280px;
+  padding: 18px 20px;
+  line-height: 1.75;
+}
+
+.ql-editor p,
+.ql-editor ol,
+.ql-editor ul,
+.ql-editor blockquote {
+  font-size: 14px;
+}
+
+.ql-snow .ql-picker.ql-header .ql-picker-label::before,
+.ql-snow .ql-picker.ql-header .ql-picker-item::before {
+  font-size: 13px;
+}
+
+/* Dark mode: recolor Quill's snow chrome (buttons, strokes, pickers, editor) */
+.dark .ql-toolbar.ql-snow {
+  background: transparent;
+}
+
+.dark .ql-snow .ql-stroke {
+  stroke: #cbd5e1;
+}
+
+.dark .ql-snow .ql-fill {
+  fill: #cbd5e1;
+}
+
+.dark .ql-snow .ql-stroke.ql-thin {
+  stroke: #94a3b8;
+}
+
+.dark .ql-snow .ql-picker {
+  color: #cbd5e1;
+}
+
+.dark .ql-snow .ql-picker-options {
+  background: #0f172a;
+  border-color: #1e293b;
+}
+
+.dark .ql-snow .ql-picker-item:hover {
+  color: #14b8a6;
+}
+
+.dark .ql-snow .ql-toolbar button:hover .ql-stroke,
+.dark .ql-snow .ql-toolbar button.ql-active .ql-stroke,
+.dark .ql-snow .ql-toolbar .ql-picker-label:hover .ql-stroke,
+.dark .ql-snow .ql-toolbar .ql-picker-label.ql-active .ql-stroke {
+  stroke: #14b8a6;
+}
+
+.dark .ql-snow .ql-toolbar button:hover .ql-fill,
+.dark .ql-snow .ql-toolbar button.ql-active .ql-fill,
+.dark .ql-snow .ql-toolbar .ql-picker-label:hover .ql-fill,
+.dark .ql-snow .ql-toolbar .ql-picker-label.ql-active .ql-fill {
+  fill: #14b8a6;
+}
+
+.dark .ql-snow .ql-toolbar button.ql-active,
+.dark .ql-snow .ql-toolbar .ql-picker-label.ql-active {
+  color: #14b8a6;
+}
+
+.dark .ql-editor {
+  color: #e2e8f0;
+}
+
+.dark .ql-editor.ql-blank::before {
+  color: #475569;
+}
+
+.dark .ql-snow .ql-tooltip {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-color: #334155;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+}
+
+.dark .ql-snow .ql-tooltip input[type="text"] {
+  background: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+/* ── Alignment classes from the editor, applied on the PUBLIC page ───────────
+   Quill saves alignment as class="ql-align-*" on block elements. The snow
+   stylesheet only styles them inside the editor, so add global rules so the
+   Foreword page (Tailwind prose) renders justified/centered text too. */
+.ql-align-left { text-align: left; }
+.ql-align-center { text-align: center; }
+.ql-align-right { text-align: right; }
+.ql-align-justify { text-align: justify; }

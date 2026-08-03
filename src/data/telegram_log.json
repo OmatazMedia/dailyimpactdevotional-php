@@ -1,0 +1,24 @@
+[
+  {
+    "id": "mrto1qf2hgulz",
+    "devotionalId": "mrtg32tgkpsog",
+    "devotionalTitle": "Divine Deliverance from Fear and Anxiety",
+    "scheduledDate": "July 20",
+    "scheduledYear": 2026,
+    "postTime": "manual",
+    "status": "sent",
+    "sentAt": "2026-07-20T20:17:23.966Z",
+    "telegramMessageId": 3
+  },
+  {
+    "id": "mrxyfq78fkew5",
+    "devotionalId": "mrtg32tg3mm8h",
+    "devotionalTitle": "Breakthrough Through Praise",
+    "scheduledDate": "July 23",
+    "scheduledYear": 2026,
+    "postTime": "21:19",
+    "status": "sent",
+    "sentAt": "2026-07-23T20:19:17.732Z",
+    "telegramMessageId": 4
+  }
+]

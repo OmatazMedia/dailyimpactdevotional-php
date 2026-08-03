@@ -1,0 +1,25 @@
+# Daily Impact Devotional — protect config files (db.php credentials and the
+# auto-generated secret.key.php encryption key) from direct web access.
+# config/ is only ever reached via server-side includes from api/*.php, so
+# denying all HTTP access here breaks nothing.
+
+<IfModule mod_authz_core.c>
+    # Apache 2.4+
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    # Apache 2.2
+    Order allow,deny
+    Deny from all
+</IfModule>
+
+# Never serve the encryption key as plain text even if mod_authz is off.
+<Files "secret.key.php">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</Files>

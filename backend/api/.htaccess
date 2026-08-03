@@ -1,0 +1,32 @@
+# Daily Impact Devotional - API .htaccess
+# The frontend now requests explicit PHP files (admin.php, settings.php,
+# devotionals.php, ...), so no extensionless rewrites are needed for the app.
+# Only external-facing endpoints keep friendly URLs (payment webhooks and
+# cron jobs are configured with these paths).
+
+RewriteEngine On
+
+# ─── CORS headers ───────────────────────────────────────────────────────────
+<IfModule mod_headers.c>
+    Header always set Access-Control-Allow-Origin "*"
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization"
+</IfModule>
+
+# ─── EXTERNAL ENDPOINTS (friendly URLs kept) ────────────────────────────────
+# Payment providers (Paystack / Flutterwave) POST here from their dashboards.
+RewriteRule ^webhook/payment/?$ webhook-payment.php [QSA,L]
+
+# cPanel cron job hits the Telegram scheduler on this path.
+RewriteRule ^telegram/cron/?$ telegram-cron.php [QSA,L]
+
+# Mail queue flush endpoint (cron or admin).
+RewriteRule ^mail-queue/?$ mail-queue.php [QSA,L]
+
+# ─── FALLBACK ───────────────────────────────────────────────────────────────
+# Unknown API paths → 404 (never the SPA index.html). The !-f guard ensures
+# explicit .php files (admin.php, settings.php, ...) are served directly and
+# are NOT caught by this rule.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ - [R=404,L]

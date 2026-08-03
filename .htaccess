@@ -1,0 +1,83 @@
+# Daily Impact Devotional - Main .htaccess
+# Handles SPA routing for React frontend and PHP API routing
+
+# Enable URL rewriting
+RewriteEngine On
+
+# Redirect www to non-www (optional - uncomment if needed)
+# RewriteCond %{HTTP_HOST} ^www\.(.+)$ [NC]
+# RewriteRule ^(.*)$ https://%1/$1 [R=301,L]
+
+# Force HTTPS (uncomment on production with SSL)
+# RewriteCond %{HTTPS} off
+# RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+
+# ─── SECURITY (must precede all other backend rules) ────────────────────────
+# Deny access to the config directory (db.php holds credentials).
+RewriteRule ^backend/config/ - [F,L]
+
+# Deny the docs folder (markdown guides, setup notes).
+RewriteRule ^docs/ - [F,L]
+
+# ─── API ROUTING ────────────────────────────────────────────────────────────
+# All PHP endpoints live in the backend/ folder. The frontend requests explicit
+# PHP files (e.g. /backend/api/admin.php, /backend/api/settings.php), so NO
+# extensionless rewrites are required. Pass backend/* through untouched so real
+# PHP files are served directly and backend/api/.htaccess can route the remaining
+# external endpoints (webhooks, cron). API requests must NEVER fall through to
+# the SPA index.html fallback below.
+RewriteRule ^backend/ - [L]
+
+# ─── FILE UPLOADS ───────────────────────────────────────────────────────────
+# Serve uploaded files directly (real files are served by the -f rule below).
+# RewriteCond %{REQUEST_URI} ^/uploads/
+# RewriteCond %{REQUEST_FILENAME} -f
+# RewriteRule ^uploads/(.*)$ uploads/$1 [L]
+
+# ─── SPA ROUTING (React) ────────────────────────────────────────────────────
+# If the requested file or directory exists, serve it directly
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Otherwise, serve index.html (for React's client-side routing)
+RewriteRule ^ index.html [L]
+
+# Deny access to sensitive files (kept after rewrites for defense-in-depth)
+<FilesMatch "\.(sql|md|env|lock|json|yml|yaml)$">
+    Require all denied
+</FilesMatch>
+
+# The PWA manifest (manifest.json) is public — exempt it from the JSON deny above.
+<Files "manifest.json">
+    Require all granted
+</Files>
+
+# ─── PHP SETTINGS ───────────────────────────────────────────────────────────
+<IfModule mod_php.c>
+    php_value upload_max_filesize 50M
+    php_value post_max_size 55M
+    php_value max_execution_time 300
+    php_value max_input_time 300
+    php_flag display_errors Off
+</IfModule>
+
+# ─── CACHING ────────────────────────────────────────────────────────────────
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType image/jpg "access plus 1 month"
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/gif "access plus 1 month"
+    ExpiresByType image/webp "access plus 1 month"
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+</IfModule>
+
+# ─── GZIP ───────────────────────────────────────────────────────────────────
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript application/javascript application/json
+</IfModule>
+
+# ─── CHARACTER SET ──────────────────────────────────────────────────────────
+AddDefaultCharset UTF-8

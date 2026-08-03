@@ -1,0 +1,221 @@
+-- Daily Impact Devotional - MySQL Schema
+-- Compatible with cPanel MySQL
+
+CREATE TABLE IF NOT EXISTS `settings` (
+    `setting_key` VARCHAR(100) PRIMARY KEY,
+    `setting_value` TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `devotionals` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `date` VARCHAR(50) NOT NULL COMMENT 'e.g. July 20',
+    `year` INT NOT NULL,
+    `title` TEXT NOT NULL,
+    `scripture_ref` TEXT,
+    `scripture_text` TEXT,
+    `paragraphs` LONGTEXT COMMENT 'JSON array of paragraphs',
+    `additional_scripture` TEXT,
+    `prayer_confession` TEXT,
+    `bible_reading` TEXT,
+    `author` VARCHAR(255) DEFAULT 'Dr. Andy Osakwe',
+    `image_url` TEXT,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX `idx_date_year` (`date`, `year`),
+    INDEX `idx_year` (`year`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `header_mappings` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `date_key` VARCHAR(100) NOT NULL COMMENT 'e.g. July 20',
+    `file_name` VARCHAR(255) NOT NULL,
+    `data_url` LONGTEXT COMMENT 'Base64 data URL (for backward compat)',
+    `file_path` VARCHAR(500) COMMENT 'Path to saved file on disk',
+    `month` VARCHAR(50),
+    `day` INT,
+    `year` INT,
+    `month_folder` VARCHAR(100) COMMENT 'e.g. july_2025',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uk_date_key` (`date_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `foreword_posts` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `title` VARCHAR(255) NOT NULL,
+    `content` LONGTEXT COMMENT 'HTML content from rich text editor',
+    `author` VARCHAR(255) DEFAULT 'Dr. Andy Osakwe',
+    `published_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `donations` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `reference` VARCHAR(255),
+    `amount` DECIMAL(12, 2) DEFAULT 0.00,
+    `currency` VARCHAR(10) DEFAULT 'NGN',
+    `email` VARCHAR(255),
+    `name` VARCHAR(255),
+    `provider` VARCHAR(50) DEFAULT 'paystack',
+    `status` ENUM('success', 'pending', 'failed') DEFAULT 'pending',
+    `donated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_reference` (`reference`),
+    INDEX `idx_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `login_logs` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `email` VARCHAR(255) NOT NULL,
+    `ip_address` VARCHAR(45),
+    `user_agent` TEXT,
+    `location` VARCHAR(255),
+    `success` TINYINT(1) DEFAULT 0,
+    `logged_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_email` (`email`),
+    INDEX `idx_logged_at` (`logged_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `admin_users` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `email` VARCHAR(255) NOT NULL UNIQUE,
+    `password_hash` VARCHAR(255) NOT NULL,
+    `name` VARCHAR(255),
+    `role` VARCHAR(50) NOT NULL DEFAULT 'admin',
+    `status` VARCHAR(20) NOT NULL DEFAULT 'Active',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `telegram_log` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `devotional_id` VARCHAR(36),
+    `devotional_title` TEXT,
+    `scheduled_date` VARCHAR(50),
+    `scheduled_year` INT,
+    `post_time` VARCHAR(20),
+    `status` ENUM('scheduled', 'sent', 'failed', 'skipped') DEFAULT 'scheduled',
+    `sent_at` TIMESTAMP NULL,
+    `telegram_message_id` INT,
+    `error` TEXT,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_devotional` (`devotional_id`),
+    INDEX `idx_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `mail_queue` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `to_email` VARCHAR(255) NOT NULL,
+    `subject` VARCHAR(500),
+    `body` LONGTEXT,
+    `sent` TINYINT(1) DEFAULT 0,
+    `sent_at` TIMESTAMP NULL,
+    `error` TEXT,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_sent` (`sent`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `ip_bans` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `ip_address` VARCHAR(45) NOT NULL,
+    `ip_version` TINYINT(1) NOT NULL DEFAULT 4,
+    `cidr` VARCHAR(80) NOT NULL,
+    `ban_start` VARCHAR(80) NOT NULL,
+    `ban_end` VARCHAR(80) NOT NULL,
+    `reason` VARCHAR(255) NOT NULL,
+    `source` VARCHAR(50) DEFAULT 'admin-login',
+    `email` VARCHAR(255) DEFAULT '',
+    `failed_attempts` INT DEFAULT 0,
+    `active` TINYINT(1) DEFAULT 1,
+    `unbanned_at` TIMESTAMP NULL,
+    `unbanned_by` VARCHAR(255) DEFAULT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uk_cidr_active` (`cidr`, `active`),
+    INDEX `idx_active` (`active`),
+    INDEX `idx_ip_address` (`ip_address`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `uploaded_files` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `original_name` VARCHAR(255) NOT NULL,
+    `saved_name` VARCHAR(255) NOT NULL,
+    `file_path` VARCHAR(500) NOT NULL,
+    `file_type` VARCHAR(50) COMMENT 'header, devotional_docx, homepage_hero',
+    `file_size` INT,
+    `mime_type` VARCHAR(100),
+    `month` VARCHAR(50),
+    `year` INT,
+    `month_folder` VARCHAR(100),
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_file_type` (`file_type`),
+    INDEX `idx_month_folder` (`month_folder`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Real-time administrative activity feed (populated by logActivity() in
+-- config/db.php from the admin/devotionals/headers/telegram endpoints).
+CREATE TABLE IF NOT EXISTS `activity_log` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `action` VARCHAR(50) NOT NULL,
+    `message` TEXT NOT NULL,
+    `entity_type` VARCHAR(50) DEFAULT '',
+    `entity_id` VARCHAR(255) DEFAULT '',
+    `actor` VARCHAR(255) DEFAULT '',
+    `ip_address` VARCHAR(45) DEFAULT '',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Real visitor reaction votes (one vote per devotional + emoji + IP). Counts
+-- are derived by GROUP BY — no fake seeded numbers anywhere.
+CREATE TABLE IF NOT EXISTS `devotional_reaction_votes` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `devotional_id` VARCHAR(36) NOT NULL,
+    `emoji` VARCHAR(32) NOT NULL,
+    `ip_hash` CHAR(64) NOT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uk_vote` (`devotional_id`, `emoji`, `ip_hash`),
+    INDEX `idx_devotional` (`devotional_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Insert default settings
+INSERT IGNORE INTO `settings` (`setting_key`, `setting_value`) VALUES
+('admin_timezone', 'Africa/Lagos'),
+('telegram_enabled', 'false'),
+('telegram_post_time', '06:00'),
+('telegram_schedule_mode', 'scheduled'),
+('admin_password_hash', ''),
+('notify_email', ''),
+('smtp_host', ''),
+('smtp_user', ''),
+('smtp_pass', ''),
+('smtp_port', '587'),
+('smtp_secure', 'tls'),
+('mail_method', 'resend'),
+('resend_api_key', ''),
+('resend_from_email', ''),
+('resend_from_name', 'Daily Impact Devotional'),
+('resend_reply_to', ''),
+('resend_enabled', 'true'),
+('homepage_hero_image', ''),
+('paystack_public_key', ''),
+('paystack_secret_key', ''),
+('paystack_enabled', 'false'),
+('flutterwave_public_key', ''),
+('flutterwave_secret_key', ''),
+('flutterwave_encryption_key', ''),
+('flutterwave_enabled', 'false'),
+('webhook_url', ''),
+('webhook_secret', ''),
+('default_currency', 'NGN'),
+('donation_message', 'Thank you for supporting Daily Impact Devotional.'),
+('bank_transfer_enabled', 'true'),
+('bank_account_name', 'Daily Impact Devotional Ministries'),
+('bank_account_number', ''),
+('bank_name', ''),
+('security_lockout_threshold', '3'),
+('security_ban_minutes', '15'),
+('security_subnet_v4', '24'),
+('security_subnet_v6', '64'),
+('security_notify_emails', '');
+
+-- Insert default admin (password: admin123 - CHANGE AFTER INSTALL!)
+INSERT IGNORE INTO `admin_users` (`email`, `password_hash`, `name`, `role`) VALUES
+('admin@ministries.org', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Admin', 'admin');

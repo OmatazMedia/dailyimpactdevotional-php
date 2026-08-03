@@ -1,0 +1,29 @@
+# ─── Dependencies & build output ──────────────────────────────────────────
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+
+# ─── Environment files (keep only the example) ────────────────────────────
+.env*
+!.env.example
+
+# ─── Runtime-created folders (uploads + PHP sessions) ─────────────────────
+upload/
+tmp/
+
+# ─── Deployment artifacts (regenerable via npm run build + zip-deploy) ────
+cpanel-upload/
+*.zip
+
+# ─── Secrets — NEVER commit these ─────────────────────────────────────────
+# Live Telegram credentials (bot token / channel) — local dev seed only.
+src/data/settings.json
+# Auto-generated AES-256 encryption key (created on first server request).
+backend/config/secret.key.php
+
+# ─── Local tool state ─────────────────────────────────────────────────────
+.freebuff/
+.vscode/
