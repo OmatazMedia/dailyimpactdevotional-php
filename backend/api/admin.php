@@ -138,7 +138,6 @@ switch ($method) {
                     $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
 
                     if ($recentFailures >= $lockoutThreshold) {
-                        $banMinutes = (int)getSetting('security_ban_minutes', '15');
                         recordIpBan(
                             $ip,
                             "Automatic ban after {$lockoutThreshold} failed login attempts",
@@ -148,8 +147,8 @@ switch ($method) {
                         );
                         jsonResponse([
                             'success' => false,
-                            'message' => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
-                            'error'   => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                            'message' => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
+                            'error'   => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
                             'banned'  => true,
                             'attemptsRemaining' => 0,
                         ], 403);
@@ -212,7 +211,6 @@ switch ($method) {
             $emailFailures = (int)$emailFailStmt->fetchColumn();
 
             $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
-            $banMinutes = (int)getSetting('security_ban_minutes', '15');
 
             if ($recentFailures >= $lockoutThreshold || $emailFailures >= $lockoutThreshold) {
                 // Ban the entire IP subnet
@@ -240,8 +238,8 @@ switch ($method) {
 
                 jsonResponse([
                     'success' => false,
-                    'message' => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
-                    'error'   => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                    'message' => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
+                    'error'   => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
                     'banned'  => true,
                     'attemptsRemaining' => 0,
                 ], 403);

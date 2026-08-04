@@ -233,7 +233,9 @@ INSERT IGNORE INTO `settings` (`setting_key`, `setting_value`) VALUES
 ('bank_account_number', ''),
 ('bank_name', ''),
 ('security_lockout_threshold', '3'),
-('security_ban_minutes', '15'),
+-- Bans are PERMANENT until an administrator unbans the IP from the dashboard.
+-- (security_ban_minutes is kept for backward compatibility but no longer expires bans.)
+('security_ban_minutes', '0'),
 ('security_subnet_v4', '24'),
 ('security_subnet_v6', '64'),
 ('security_notify_emails', '');

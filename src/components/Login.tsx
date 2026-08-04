@@ -335,8 +335,8 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
             }`}>
               <span className="font-black uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-1">What can I do?</span>
               Your IP address was automatically banned after repeated failed login attempts.
-              Wait for the ban to expire (see the message above) or contact the site administrator
-              to have it lifted. Continued attempts will not work while the ban is active.
+              This ban does not expire on its own — contact the site administrator to have it
+              lifted from the dashboard. Continued attempts will not work while the ban is active.
             </div>
             <button
               type="button"                  onClick={() => { setBannedMessage(""); setLoginStep("email"); setErrorMessage(""); setShowAttemptWarning(false); setAttemptsRemaining(3); }}

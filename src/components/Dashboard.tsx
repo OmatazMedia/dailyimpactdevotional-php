@@ -3733,7 +3733,7 @@ export default function Dashboard({
 
                           <div className="space-y-4">
                             <p className="text-[11px] leading-relaxed text-slate-500">
-                              Manage IP address bans for security. Bans affect entire IP subnets to prevent access from related addresses.
+                              Manage IP address bans for security. Bans affect entire IP subnets and stay active until you unban them here — they do not expire automatically.
                             </p>
 
                             {/* Create New Ban Form */}

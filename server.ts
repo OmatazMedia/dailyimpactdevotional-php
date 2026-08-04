@@ -464,7 +464,7 @@ app.post("/api/admin", (req: Request, res: Response) => {
         loginFailures.set(ip, attempts + 1);
         const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
         if (remaining <= 0) {
-          res.status(403).json({ success: false, error: "Too many failed attempts. Your IP has been banned for 15 minutes. Contact an administrator if this is an error.", banned: true, attemptsRemaining: 0 });
+          res.status(403).json({ success: false, error: "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.", banned: true, attemptsRemaining: 0 });
         } else {
           res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
         }
@@ -491,7 +491,7 @@ app.post("/api/admin", (req: Request, res: Response) => {
       loginFailures.set(ip, attempts + 1);
       const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
       if (remaining <= 0) {
-        res.status(403).json({ success: false, error: "Too many failed attempts. Your IP has been banned for 15 minutes. Contact an administrator if this is an error.", banned: true, attemptsRemaining: 0 });
+        res.status(403).json({ success: false, error: "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.", banned: true, attemptsRemaining: 0 });
       } else {
         res.status(401).json({ success: false, error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before IP ban.`, attemptsRemaining: remaining });
       }
