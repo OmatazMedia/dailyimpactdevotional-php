@@ -316,7 +316,7 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
           </motion.div>
         )}
 
-        {/* ── BANNED SCREEN — shown when the server bans this IP ── */}
+        {/* ── BANNED SCREEN — short and direct: banned → contact admin ── */}
         {bannedMessage ? (
           <div className="py-2 text-center space-y-4">
             <div className="w-14 h-14 rounded-full bg-rose-500/15 text-rose-500 flex items-center justify-center mx-auto">
@@ -325,21 +325,14 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
               </svg>
             </div>
             <h2 className="font-serif text-lg font-black text-rose-600 dark:text-rose-400">
-              Access Blocked
+              You have been banned
             </h2>
-            <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400 max-w-[240px] mx-auto">
               {bannedMessage}
             </p>
-            <div className={`p-3 rounded-xl border text-left text-[10px] leading-relaxed ${
-              isDarkMode ? "bg-slate-950/60 border-slate-800 text-slate-400" : "bg-slate-50 border-slate-200 text-slate-500"
-            }`}>
-              <span className="font-black uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-1">What can I do?</span>
-              Your IP address was automatically banned after repeated failed login attempts.
-              This ban does not expire on its own — contact the site administrator to have it
-              lifted from the dashboard. Continued attempts will not work while the ban is active.
-            </div>
             <button
-              type="button"                  onClick={() => { setBannedMessage(""); setLoginStep("email"); setErrorMessage(""); setShowAttemptWarning(false); setAttemptsRemaining(3); }}
+              type="button"
+              onClick={() => { setBannedMessage(""); setLoginStep("email"); setErrorMessage(""); setShowAttemptWarning(false); setAttemptsRemaining(3); }}
               className="w-full py-2 text-xs font-bold text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
             >
               Back to sign in

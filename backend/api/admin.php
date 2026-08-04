@@ -92,8 +92,8 @@ switch ($method) {
             if ($existingBan && $existingBan['active']) {
                 jsonResponse([
                     'success' => false,
-                    'message' => 'Your IP address has been banned due to repeated failed login attempts. Contact an administrator.',
-                    'error'   => 'Your IP address has been banned due to repeated failed login attempts. Contact an administrator.',
+                    'message' => 'You have been banned for too many failed login attempts. Please contact the administrator.',
+                    'error'   => 'You have been banned for too many failed login attempts. Please contact the administrator.',
                     'banned'  => true,
                     'attemptsRemaining' => 0,
                 ], 403);
@@ -147,8 +147,8 @@ switch ($method) {
                         );
                         jsonResponse([
                             'success' => false,
-                            'message' => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
-                            'error'   => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
+                            'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                            'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
                             'banned'  => true,
                             'attemptsRemaining' => 0,
                         ], 403);
@@ -238,8 +238,8 @@ switch ($method) {
 
                 jsonResponse([
                     'success' => false,
-                    'message' => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
-                    'error'   => "Too many failed attempts. Your IP address has been banned. This ban is permanent until an administrator unbans it. Contact the site administrator to regain access.",
+                    'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                    'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
                     'banned'  => true,
                     'attemptsRemaining' => 0,
                 ], 403);
