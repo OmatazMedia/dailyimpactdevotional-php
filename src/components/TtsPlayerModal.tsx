@@ -19,7 +19,13 @@ export default function TtsPlayerModal({
   const [isPaused, setIsPaused] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceName, setSelectedVoiceName] = useState<string>("");
-  const [rate, setRate] = useState<number>(1.0); // Speed: 0.5 to 2.0
+  const [rate, setRate] = useState<number>(() => {
+    // Restore the reader's last chosen speed (0.5x–2.0x) if available.
+    try {
+      const saved = parseFloat(localStorage.getItem("did_tts_rate") || "1");
+      return saved >= 0.5 && saved <= 2 ? saved : 1.0;
+    } catch { return 1.0; }
+  }); // Speed: 0.5 to 2.0
   const [volume, setVolume] = useState<number>(0.8); // Volume: 0 to 1
   const [currentParagraphIndex, setCurrentParagraphIndex] = useState<number>(-1);
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -27,6 +33,30 @@ export default function TtsPlayerModal({
 
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
+  // True once the reader manually picks a voice — stops the onvoiceschanged
+  // listener from overriding their choice on browsers that fire it repeatedly.
+  const userPickedVoiceRef = useRef(false);
+
+  // ── Live visualization + seek ──
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const barLevelsRef = useRef<number[]>([]);
+  const partStartTsRef = useRef(0);
+  // 0..1 overall progress across the whole devotional (drives the seek bar).
+  const [overallPos, setOverallPos] = useState(0);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [totalEstSec, setTotalEstSec] = useState(0);
+  const [isDraggingSeek, setIsDraggingSeek] = useState(false);
+
+  // Refs mirroring state so the animation loop & tick never read stale values.
+  const isPlayingRef = useRef(isPlaying);
+  const isPausedRef = useRef(isPaused);
+  const curIdxRef = useRef(currentParagraphIndex);
+  const rateRef = useRef(rate);
+  isPlayingRef.current = isPlaying;
+  isPausedRef.current = isPaused;
+  curIdxRef.current = currentParagraphIndex;
+  rateRef.current = rate;
 
   // Initialize speech synthesis and load voices
   useEffect(() => {
@@ -36,13 +66,21 @@ export default function TtsPlayerModal({
       const updateVoices = () => {
         const availableVoices = window.speechSynthesis.getVoices();
         setVoices(availableVoices);
-        
-        // Select a default English voice (preferably premium/natural if available)
-        const englishVoice = availableVoices.find(
-          (v) => v.lang.startsWith("en") && (v.name.includes("Google") || v.name.includes("Natural") || v.name.includes("Premium"))
-        ) || availableVoices.find((v) => v.lang.startsWith("en")) || availableVoices[0];
+        if (userPickedVoiceRef.current) return; // never override a manual choice
 
-        if (englishVoice && !selectedVoiceName) {
+        // Restore the reader's saved voice if still installed, else fall back
+        // to a default English voice (preferably premium/natural if available).
+        let savedVoice = "";
+        try { savedVoice = localStorage.getItem("did_tts_voice") || ""; } catch { /* ignore */ }
+        const englishVoice =
+          availableVoices.find((v) => v.name === savedVoice)
+          || availableVoices.find(
+              (v) => v.lang.startsWith("en") && (v.name.includes("Google") || v.name.includes("Natural") || v.name.includes("Premium"))
+            )
+          || availableVoices.find((v) => v.lang.startsWith("en"))
+          || availableVoices[0];
+
+        if (englishVoice) {
           setSelectedVoiceName(englishVoice.name);
         }
       };
@@ -68,6 +106,9 @@ export default function TtsPlayerModal({
     setIsPaused(false);
     setCurrentParagraphIndex(-1);
     setErrorMessage("");
+    setOverallPos(0);
+    setElapsedSec(0);
+    setTotalEstSec(0);
   }, [devotional.id, isOpen]);
 
   const speakText = (text: string, onEndCallback: () => void) => {
@@ -111,6 +152,7 @@ export default function TtsPlayerModal({
       setIsPaused(false);
     };
 
+    partStartTsRef.current = performance.now();
     synthRef.current.speak(utterance);
   };
 
@@ -123,6 +165,144 @@ export default function TtsPlayerModal({
     `Prayer and Confession. ${devotional.prayerConfession}`,
     `One Year Bible Reading. ${devotional.bibleReading}`
   ];
+  const partsRef = useRef(readableParts);
+  partsRef.current = readableParts;
+
+  // Estimated duration (seconds) of one spoken segment: ~15 characters per
+  // second at 1.0x reading speed, scaled by the chosen rate.
+  const estPartSeconds = (text: string): number =>
+    Math.max(2, Math.round(text.length / (15 * (rateRef.current || 1))));
+  const estPartSecondsRef = useRef(estPartSeconds);
+  estPartSecondsRef.current = estPartSeconds;
+
+  const fmtClock = (sec: number): string => {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, "0")}`;
+  };
+
+  // ── Live canvas visualizer + progress ticks ────────────────────────────────
+  // The bars react in real time while speaking (smooth random-walk driven by a
+  // requestAnimationFrame loop), settle to a low idle state when paused/stopped.
+  useEffect(() => {
+    if (!isOpen) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const W = 520;
+    const H = 96;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = "100%";
+    canvas.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const BAR_COUNT = 56;
+    const gap = 3;
+    const bw = (W - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+    const levels = barLevelsRef.current;
+    if (levels.length !== BAR_COUNT) {
+      barLevelsRef.current = Array.from({ length: BAR_COUNT }, () => 4);
+    }
+
+    const draw = () => {
+      const active = isPlayingRef.current && !isPausedRef.current;
+      const amp = active ? 1 : 0.08;
+      const arr = barLevelsRef.current;
+      for (let i = 0; i < BAR_COUNT; i++) {
+        // Random-walk target; bars chase it for an organic "live speech" look.
+        const target = (0.2 + Math.random() * 0.8) * H * 0.9 * amp;
+        arr[i] += (target - arr[i]) * (active ? 0.32 : 0.1);
+      }
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < BAR_COUNT; i++) {
+        const h = Math.max(2, arr[i]);
+        const x = i * (bw + gap);
+        const y = H - h;
+        const grad = ctx.createLinearGradient(0, y, 0, H);
+        grad.addColorStop(0, active ? "#5eead4" : "#cbd5e1");
+        grad.addColorStop(1, active ? "#0d9488" : "#94a3b8");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.roundRect(x, y, bw, h, bw / 2);
+        ctx.fill();
+      }
+      rafRef.current = requestAnimationFrame(draw);
+    };
+    rafRef.current = requestAnimationFrame(draw);
+
+    // Progress tick: elapsed / total estimates across every segment.
+    const tick = window.setInterval(() => {
+      if (!isPlayingRef.current || isPausedRef.current) return;
+      const idx = curIdxRef.current;
+      const parts = partsRef.current;
+      if (idx < 0 || idx >= parts.length) return;
+      let cum = 0;
+      for (let i = 0; i < idx; i++) cum += estPartSecondsRef.current(parts[i]);
+      const partDur = estPartSecondsRef.current(parts[idx]);
+      const elapsedInPart = Math.min(partDur, (performance.now() - partStartTsRef.current) / 1000);
+      const total = parts.reduce((s, p) => s + estPartSecondsRef.current(p), 0);
+      const pos = total > 0 ? Math.min(1, (cum + elapsedInPart) / total) : 0;
+      setTotalEstSec(total);
+      setElapsedSec(Math.round(pos * total));
+      if (!isDraggingSeek) setOverallPos(pos);
+    }, 250);
+
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      window.clearInterval(tick);
+    };
+  }, [isOpen, isDraggingSeek]);
+
+  // Seek across the whole devotional: maps the clicked position to the
+  // nearest segment and restarts playback from there (SpeechSynthesis has no
+  // intra-utterance seek, so segment-level seeking is the accurate approach).
+  const handleSeek = (value: number) => {
+    const frac = value / 1000;
+    setOverallPos(frac);
+    const parts = readableParts;
+    const total = parts.reduce((s, p) => s + estPartSeconds(p), 0);
+    const targetSec = frac * total;
+    let idx = 0;
+    let acc = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const d = estPartSeconds(parts[i]);
+      if (acc + d >= targetSec) { idx = i; break; }
+      acc += d;
+      idx = i + 1;
+    }
+    idx = Math.min(Math.max(idx, 0), parts.length - 1);
+    if (isPlaying || currentParagraphIndex !== -1) {
+      playPart(idx);
+    } else {
+      setCurrentParagraphIndex(idx);
+    }
+  };
+
+  // Shared handlers for the compact controls (next to the visualizer) and the
+  // full settings panel — one behavior, two places.
+  const handleVoiceChange = (name: string) => {
+    userPickedVoiceRef.current = true;
+    setSelectedVoiceName(name);
+    try { localStorage.setItem("did_tts_voice", name); } catch { /* ignore */ }
+    if (isPlaying && !isPaused) {
+      // Restart current paragraph with the new voice immediately.
+      setTimeout(() => playPart(currentParagraphIndex), 100);
+    }
+  };
+
+  const handleRateChange = (val: number) => {
+    setRate(val);
+    try { localStorage.setItem("did_tts_rate", String(val)); } catch { /* ignore */ }
+    if (isPlaying && synthRef.current) {
+      // Restart current paragraph to apply the new speed immediately.
+      const curIdx = currentParagraphIndex;
+      synthRef.current.cancel();
+      playPart(curIdx);
+    }
+  };
 
   const handlePlayPause = () => {
     if (!synthRef.current) return;
@@ -154,6 +334,8 @@ export default function TtsPlayerModal({
       setIsPlaying(false);
       setIsPaused(false);
       setCurrentParagraphIndex(-1);
+      setOverallPos(1);
+      setElapsedSec(totalEstSec || 0);
       return;
     }
 
@@ -171,6 +353,9 @@ export default function TtsPlayerModal({
     setIsPlaying(false);
     setIsPaused(false);
     setCurrentParagraphIndex(-1);
+    setOverallPos(0);
+    setElapsedSec(0);
+    setTotalEstSec(0);
   };
 
   const handleNextPart = () => {
@@ -241,50 +426,112 @@ export default function TtsPlayerModal({
           </button>
         </div>
 
-        {/* Live Audio Visualizer Animation */}
+        {/* Live Audio Visualizer — real-time canvas waveform while speaking */}
         <div
-          className={`flex flex-col items-center justify-center py-6 rounded-2xl mb-6 border ${
+          className={`flex flex-col items-center justify-center pt-6 pb-4 px-4 rounded-2xl mb-4 border ${
             isDarkMode ? "bg-slate-950/40 border-slate-800" : "bg-slate-50 border-slate-100"
           }`}
         >
-          {/* Wave visualizer */}
-          <div className="flex items-end justify-center gap-[4px] h-12 mb-3">
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((bar) => {
-              // Vary animation delay to look natural
-              const delay = `${(bar * 0.15).toFixed(2)}s`;
-              const height = isPlaying && !isPaused ? "animate-pulse" : "h-2";
-              return (
-                <div
-                  key={bar}
-                  className={`w-[4px] bg-gradient-to-t from-teal-brand to-teal-400 rounded-full transition-all`}
-                  style={{
-                    height: isPlaying && !isPaused ? "100%" : "8px",
-                    animationDuration: isPlaying && !isPaused ? "1.2s" : "0s",
-                    animationDelay: delay,
-                    animationIterationCount: "infinite",
-                    animationTimingFunction: "ease-in-out",
-                    maxHeight: `${Math.sin(bar * 0.4) * 24 + 28}px`,
-                  }}
-                />
-              );
-            })}
+          <canvas
+            ref={canvasRef}
+            className="w-full max-w-[520px] select-none"
+            aria-label="Live audio visualization"
+          />
+
+          <div className="flex items-center gap-2 mt-2">
+            <span className={`w-2 h-2 rounded-full transition-colors ${isPlaying && !isPaused ? "bg-emerald-500 animate-pulse" : "bg-slate-300 dark:bg-slate-600"}`} />
+            <p className="text-xs font-bold tracking-widest text-slate-400 uppercase select-none">
+              {isPlaying
+                ? isPaused
+                  ? "BROADCAST PAUSED"
+                  : "BROADCAST ACTIVE (TTS)"
+                : "READY TO BROADCAST"}
+            </p>
           </div>
 
-          <p className="text-xs font-bold tracking-widest text-slate-400 uppercase select-none">
-            {isPlaying
-              ? isPaused
-                ? "BROADCAST PAUSED"
-                : "BROADCAST ACTIVE (TTS)"
-              : "READY TO BROADCAST"}
-          </p>
+          {/* Quick voice + speed controls — right next to the visualizer */}
+          <div className="w-full max-w-[520px] mt-3.5 grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left">
+            <div className="min-w-0">
+              <label className="block text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">
+                Reader Voice
+              </label>
+              <select
+                value={selectedVoiceName}
+                onChange={(e) => handleVoiceChange(e.target.value)}
+                className={`w-full text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border truncate focus:outline-none focus:ring-1 focus:ring-teal-brand transition-all ${
+                  isDarkMode
+                    ? "bg-slate-950/60 border-slate-700 text-slate-200 focus:border-slate-600"
+                    : "bg-white border-slate-200 text-slate-800 focus:border-slate-300"
+                }`}
+                aria-label="Select reader voice"
+                title="Choose the voice used to read the devotional"
+              >
+                {voices.map((voice) => (
+                  <option key={voice.name} value={voice.name}>
+                    {voice.name} ({voice.lang})
+                  </option>
+                ))}
+                {voices.length === 0 && (
+                  <option>Standard System Voice</option>
+                )}
+              </select>
+            </div>
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-[9px] font-black uppercase tracking-widest text-slate-400">
+                  Speed
+                </label>
+                <span className="text-[11px] font-bold font-mono text-teal-brand dark:text-teal-400">
+                  {rate}x
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] font-mono text-slate-400">0.5</span>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.1"
+                  value={rate}
+                  onChange={(e) => handleRateChange(parseFloat(e.target.value))}
+                  className="w-full accent-teal-brand cursor-pointer"
+                  aria-label="Reading speed"
+                  title="Adjust reading speed from 0.5x to 2.0x"
+                />
+                <span className="text-[9px] font-mono text-slate-400">2.0</span>
+              </div>
+            </div>
+          </div>
 
           {currentParagraphIndex !== -1 && (
-            <div className="mt-3 px-4 text-center">
+            <div className="mt-2.5 px-4 text-center">
               <span className="text-[10px] font-bold bg-teal-brand/10 text-teal-brand dark:text-teal-400 px-2 py-0.5 rounded-full">
                 {getPartLabel(currentParagraphIndex)}
               </span>
             </div>
           )}
+        </div>
+
+        {/* Seek bar — drag to jump to any point of the devotional */}
+        <div className="mb-6 px-1">
+          <input
+            type="range"
+            min="0"
+            max="1000"
+            step="1"
+            value={Math.round(overallPos * 1000)}
+            onPointerDown={() => setIsDraggingSeek(true)}
+            onChange={(e) => handleSeek(parseInt(e.target.value, 10))}
+            onPointerUp={() => setIsDraggingSeek(false)}
+            onPointerLeave={() => setIsDraggingSeek(false)}
+            className="w-full accent-teal-brand cursor-pointer"
+            aria-label="Seek through devotional"
+          />
+          <div className="flex items-center justify-between text-[10px] font-mono font-bold text-slate-400 mt-1">
+            <span className="text-teal-brand dark:text-teal-400">{fmtClock(elapsedSec)}</span>
+            <span className="text-slate-300 dark:text-slate-600">| {getPartLabel(currentParagraphIndex === -1 ? 0 : currentParagraphIndex)} |</span>
+            <span>{fmtClock(totalEstSec)}</span>
+          </div>
         </div>
 
         {/* Dynamic error or permission block troubleshooting alert */}
@@ -411,13 +658,7 @@ export default function TtsPlayerModal({
                 </label>
                 <select
                   value={selectedVoiceName}
-                  onChange={(e) => {
-                    setSelectedVoiceName(e.target.value);
-                    if (isPlaying && !isPaused) {
-                      // Restart current paragraph with new voice
-                      setTimeout(() => playPart(currentParagraphIndex), 100);
-                    }
-                  }}
+                  onChange={(e) => handleVoiceChange(e.target.value)}
                   className={`w-full text-xs font-semibold px-3 py-2 rounded-xl border focus:outline-none focus:ring-1 focus:ring-teal-brand ${
                     isDarkMode
                       ? "bg-slate-800 border-slate-700 text-slate-200 focus:border-slate-600"
@@ -455,17 +696,7 @@ export default function TtsPlayerModal({
                       max="2.0"
                       step="0.1"
                       value={rate}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        setRate(val);
-                        // If speech is currently running, we can dynamic change rate
-                        if (isPlaying && synthRef.current) {
-                          // Restart current paragraph to apply speed change immediately
-                          const curIdx = currentParagraphIndex;
-                          synthRef.current.cancel();
-                          playPart(curIdx);
-                        }
-                      }}
+                      onChange={(e) => handleRateChange(parseFloat(e.target.value))}
                       className="w-full accent-teal-brand"
                     />
                     <span className="text-xs font-mono text-slate-400">2.0x</span>

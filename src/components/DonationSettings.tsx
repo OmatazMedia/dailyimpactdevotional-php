@@ -127,11 +127,28 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
   const toggleBtn = (on: boolean, toggle: () => void) => (
     <button
       type="button"
+      role="switch"
+      aria-checked={on}
       onClick={toggle}
-      className={`w-10 h-5 rounded-full relative transition-colors ${on ? "bg-teal-brand" : "bg-slate-300 dark:bg-slate-700"}`}
+      className={`relative w-12 h-7 rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-1 ${
+        on
+          ? "bg-emerald-500 shadow-[0_0_14px_rgba(16,185,129,0.45)]"
+          : "bg-slate-300 dark:bg-slate-700"
+      }`}
     >
-      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${on ? "translate-x-5" : "translate-x-0.5"}`} />
+      <span
+        className={`absolute top-1 left-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
+          on ? "translate-x-5" : "translate-x-0"
+        }`}
+      />
     </button>
+  );
+
+  // Colour-coded status pill shown next to each gateway switch.
+  const gatewayStatus = (on: boolean) => (
+    <span className={`text-[10px] font-black uppercase tracking-wider ${on ? "text-emerald-500" : "text-slate-400"}`}>
+      {on ? "● Enabled" : "○ Disabled"}
+    </span>
   );
 
   return (
@@ -175,7 +192,7 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
             <CreditCard className="w-4 h-4 text-teal-brand" /> Paystack Configuration
           </h3>
           <label className="flex items-center gap-2 cursor-pointer">
-            <span className="text-xs text-slate-400 font-bold">Enabled</span>
+            {gatewayStatus(paystack.enabled)}
             {toggleBtn(paystack.enabled, () => setPaystack(p => ({ ...p, enabled: !p.enabled })))}
           </label>
         </div>
@@ -219,7 +236,7 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
             <Globe className="w-4 h-4 text-teal-brand" /> Flutterwave Configuration
           </h3>
           <label className="flex items-center gap-2 cursor-pointer">
-            <span className="text-xs text-slate-400 font-bold">Enabled</span>
+            {gatewayStatus(flw.enabled)}
             {toggleBtn(flw.enabled, () => setFlw(f => ({ ...f, enabled: !f.enabled })))}
           </label>
         </div>
@@ -272,7 +289,7 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
             <Webhook className="w-4 h-4 text-teal-brand" /> Webhook Configuration
           </h3>
           <label className="flex items-center gap-2 cursor-pointer">
-            <span className="text-xs text-slate-400 font-bold">Enabled</span>
+            {gatewayStatus(webhook.enabled)}
             {toggleBtn(webhook.enabled, () => setWebhook(w => ({ ...w, enabled: !w.enabled })))}
           </label>
         </div>

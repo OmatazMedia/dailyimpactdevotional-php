@@ -20,6 +20,8 @@ export interface PwaState {
   isInstalled: boolean;
   /** true on iOS Safari (no beforeinstallprompt — needs manual Add to Home). */
   isIOS: boolean;
+  /** true on desktop browsers (Chrome/Edge — installable via address-bar icon). */
+  isDesktop: boolean;
 }
 
 const listeners = new Set<Listener>();
@@ -31,6 +33,7 @@ let state: PwaState = {
   isStandalone: false,
   isInstalled: false,
   isIOS: false,
+  isDesktop: false,
 };
 
 function detectStandalone(): boolean {
@@ -46,6 +49,14 @@ function detectIOS(): boolean {
   if (typeof navigator === "undefined") return false;
   return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** Desktop = a non-iOS browser without a coarse (touch) primary pointer. */
+function detectDesktop(): boolean {
+  if (typeof window === "undefined") return false;
+  if (detectIOS()) return false;
+  const coarse = window.matchMedia ? window.matchMedia("(pointer: coarse)").matches : false;
+  return !coarse;
 }
 
 function emit() {
@@ -72,6 +83,7 @@ export function initPwa() {
     ...state,
     isStandalone: detectStandalone(),
     isIOS: detectIOS(),
+    isDesktop: detectDesktop(),
   };
 
   window.addEventListener("beforeinstallprompt", (e: Event) => {

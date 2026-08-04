@@ -476,6 +476,30 @@ function normalizeSubnet(string $ip): string {
     return subnetForIp($ip);
 }
 
+/**
+ * Numeric IP range check (IPv4 or IPv6).
+ *
+ * ban_start/ban_end are stored as VARCHAR strings (e.g. "105.112.50.0" /
+ * "105.112.50.255"). Comparing them with string operators in SQL is WRONG:
+ * "105.112.50.37" > "105.112.50.255" lexically ('3' > '2'), so a /24 ban
+ * silently never matched most IPs — the auto-IP-ban appeared to do nothing.
+ * We therefore fetch candidate bans and compare the packed binary form here.
+ */
+function isIpInRange(string $ip, string $start, string $end): bool {
+    if (str_contains($ip, ':') || str_contains($start, ':')) {
+        $bin = @inet_pton($ip);
+        $s   = @inet_pton($start);
+        $e   = @inet_pton($end);
+        if ($bin === false || $s === false || $e === false) return false;
+        return strcmp($bin, $s) >= 0 && strcmp($bin, $e) <= 0;
+    }
+    $l = ip2long($ip);
+    $s = ip2long($start);
+    $e = ip2long($end);
+    if ($l === false || $s === false || $e === false) return false;
+    return $l >= $s && $l <= $e;
+}
+
 function getBanForIp(string $ip): ?array {
     global $pdo;
     if (!$pdo) {
@@ -486,14 +510,17 @@ function getBanForIp(string $ip): ?array {
         "SELECT * FROM ip_bans
          WHERE active = 1
          AND ip_version = ?
-         AND ban_start <= ?
-         AND ban_end >= ?
-         ORDER BY created_at DESC
-         LIMIT 1"
+         ORDER BY created_at DESC"
     );
-    $stmt->execute([$version, $ip, $ip]);
-    $ban = $stmt->fetch();
-    return $ban ?: null;
+    $stmt->execute([$version]);
+    // Numeric range comparison in PHP (see isIpInRange) — SQL string
+    // comparison on ban_start/ban_end is unreliable for IPs.
+    while ($ban = $stmt->fetch()) {
+        if (isIpInRange($ip, (string)($ban['ban_start'] ?? ''), (string)($ban['ban_end'] ?? ''))) {
+            return $ban;
+        }
+    }
+    return null;
 }
 
 function queueMail(string $to, string $subject, string $body): void {
@@ -630,16 +657,22 @@ function regenerateSession(): void {
 }
 
 /**
- * Bind session to client IP and User-Agent.
- * Returns true if the session fingerprint matches.
+ * Bind session to client identity (User-Agent + IP subnet) and return true
+ * if the session fingerprint matches.
+ *
+ * Subnet-level (instead of exact-IP) binding keeps sessions alive behind
+ * Cloudflare / rotating proxy edges and IPv6 privacy extensions, where the
+ * exact remote address can legitimately change between requests — previously
+ * that destroyed sessions and made admin-only data (like decrypted Telegram
+ * credentials in settings.php) "disappear" after reload/logout.
  */
 function validateSessionBinding(): bool {
     if (session_status() !== PHP_SESSION_ACTIVE) {
         return false;
     }
-    $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $ip      = getClientIp();
     $ua      = $_SERVER['HTTP_USER_AGENT'] ?? '';
-    $fingerprint = hash('sha256', $ip . '|' . $ua);
+    $fingerprint = hash('sha256', normalizeSubnet($ip) . '|' . $ua);
 
     if (!isset($_SESSION['session_fingerprint'])) {
         // First check — set fingerprint
@@ -674,6 +707,17 @@ function secureSession(int $maxIdleSeconds = 3600): bool {
     // Validate fingerprint binding
     if (!validateSessionBinding()) {
         // Possible hijack — destroy session
+        $_SESSION = [];
+        session_destroy();
+        return false;
+    }
+
+    // Hard ban guard: a banned IP loses admin access EVEN with a live session.
+    // This backs up the login-gate check so a ban takes effect instantly on
+    // every admin API call (dashboard, settings, telegram, payments, ...),
+    // while the public website stays fully browsable for that IP.
+    $ban = getBanForIp(getClientIp());
+    if ($ban !== null) {
         $_SESSION = [];
         session_destroy();
         return false;

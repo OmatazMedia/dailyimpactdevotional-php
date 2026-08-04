@@ -54,7 +54,7 @@ $isLocked = false;
 
 // Check if this IP is temporarily locked out
 if (!isset($_SESSION['admin_id'])) {
-    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $ip = getClientIp();
     $lockKey = 'login_lock_' . preg_replace('/[^a-f0-9]/', '', hash('sha256', $ip));
     $lockUntil = getSetting($lockKey, '0');
     if ($lockUntil > time()) {
@@ -90,21 +90,28 @@ switch ($method) {
             
             $existingBan = getBanForIp($ip);
             if ($existingBan && $existingBan['active']) {
-                jsonError(
-                    'Your IP address has been banned due to repeated failed login attempts. Contact an administrator.',
-                    403
-                );
+                jsonResponse([
+                    'success' => false,
+                    'message' => 'Your IP address has been banned due to repeated failed login attempts. Contact an administrator.',
+                    'error'   => 'Your IP address has been banned due to repeated failed login attempts. Contact an administrator.',
+                    'banned'  => true,
+                    'attemptsRemaining' => 0,
+                ], 403);
             }
 
             // ─── Email Validation Step ───────────────────────────────────────────
 
             if ($step === 'email') {
-                // Check if email exists (for security, we still proceed even if it doesn't)
-                $stmt = $pdo->prepare("SELECT email FROM admin_users WHERE email = ?");
+                // Check if the email exists in the system (case-insensitive). The
+                // password step is ONLY offered when the email is registered — a
+                // wrong email is rejected here so the login form cannot be probed
+                // past this gate. Repeated unknown emails are logged and trigger
+                // the same IP ban as wrong passwords.
+                $stmt = $pdo->prepare("SELECT email FROM admin_users WHERE LOWER(email) = LOWER(?)");
                 $stmt->execute([$email]);
                 $emailExists = $stmt->fetch() !== false;
 
-                // Also check legacy hash
+                // Also check legacy hash (pre-admin_users installs)
                 if (!$emailExists) {
                     $legacyHash = getSetting('admin_password_hash', '');
                     if ($legacyHash) {
@@ -112,20 +119,59 @@ switch ($method) {
                     }
                 }
 
-                // Track email validation attempts
-                $cutoff = date('Y-m-d H:i:s', time() - 900);
-                $failStmt = $pdo->prepare(
-                    "SELECT COUNT(*) FROM login_logs
-                     WHERE ip_address = ? AND email = ? AND success = 0 AND logged_at >= ?"
-                );
-                $failStmt->execute([$ip, $email, $cutoff]);
-                $emailFailures = (int)$failStmt->fetchColumn();
+                if (!$emailExists) {
+                    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+                    $logStmt = $pdo->prepare(
+                        "INSERT INTO login_logs (id, email, ip_address, user_agent, location, success) VALUES (?, ?, ?, ?, ?, 0)"
+                    );
+                    $logStmt->execute([generateId(), $email, $ip, $ua, 'Unknown']);
+
+                    // Same rate-limit / IP-ban logic as the password step, so a
+                    // burst of unknown-email guesses also gets the IP banned.
+                    $cutoff = date('Y-m-d H:i:s', time() - 900);
+                    $failStmt = $pdo->prepare(
+                        "SELECT COUNT(*) FROM login_logs
+                         WHERE ip_address = ? AND success = 0 AND logged_at >= ?"
+                    );
+                    $failStmt->execute([$ip, $cutoff]);
+                    $recentFailures = (int)$failStmt->fetchColumn();
+                    $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
+
+                    if ($recentFailures >= $lockoutThreshold) {
+                        $banMinutes = (int)getSetting('security_ban_minutes', '15');
+                        recordIpBan(
+                            $ip,
+                            "Automatic ban after {$lockoutThreshold} failed login attempts",
+                            $email,
+                            $recentFailures,
+                            'admin-login'
+                        );
+                        jsonResponse([
+                            'success' => false,
+                            'message' => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                            'error'   => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                            'banned'  => true,
+                            'attemptsRemaining' => 0,
+                        ], 403);
+                    }
+
+                    // Countdown warning: "2 attempts remaining → 1 → banned".
+                    // recentFailures already includes this failure, so remaining =
+                    // threshold - failures (clamped at 0).
+                    $attemptsRemaining = max(0, $lockoutThreshold - $recentFailures);
+                    jsonResponse([
+                        'success' => false,
+                        'message' => 'No account found with this email address. Please check and try again.',
+                        'error'   => 'No account found with this email address. Please check and try again.',
+                        'attemptsRemaining' => $attemptsRemaining,
+                    ], 401);
+                }
 
                 jsonResponse([
                     'success' => true,
                     'step' => 'password',
-                    'emailValid' => true, // Always true to prevent enumeration
-                    'attemptsRemaining' => max(0, 3 - $emailFailures)
+                    'emailValid' => true,
+                    'attemptsRemaining' => 3
                 ]);
             }
 
@@ -165,14 +211,6 @@ switch ($method) {
             $emailFailStmt->execute([$email, $cutoff]);
             $emailFailures = (int)$emailFailStmt->fetchColumn();
 
-            // Also count failures for this specific email
-            $emailFailStmt = $pdo->prepare(
-                "SELECT COUNT(*) FROM login_logs
-                 WHERE email = ? AND success = 0 AND logged_at >= ?"
-            );
-            $emailFailStmt->execute([$email, $cutoff]);
-            $emailFailures = (int)$emailFailStmt->fetchColumn();
-
             $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
             $banMinutes = (int)getSetting('security_ban_minutes', '15');
 
@@ -200,10 +238,13 @@ switch ($method) {
                     }
                 }
 
-                jsonError(
-                    "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
-                    403
-                );
+                jsonResponse([
+                    'success' => false,
+                    'message' => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                    'error'   => "Too many failed attempts. Your IP has been banned for {$banMinutes} minutes. Contact an administrator if this is an error.",
+                    'banned'  => true,
+                    'attemptsRemaining' => 0,
+                ], 403);
             }
 
             // ─── Authentication ───────────────────────────────────────────────
@@ -241,12 +282,16 @@ switch ($method) {
                     'Unknown',
                 ]);
 
-                // Prevent email enumeration — use same message regardless
-                $attemptsRemaining = $lockoutThreshold - max($recentFailures, $emailFailures) - 1;
-                jsonError(
-                    'Invalid email or password. ' . ($attemptsRemaining > 0 ? "{$attemptsRemaining} attempts remaining before IP ban." : "Your IP will be banned on next failed attempt."),
-                    401
-                );
+                // Prevent email enumeration — use same message regardless.
+                // Countdown warning mirrors the email step: the server bans when
+                // failures reach the threshold, and the client shows 2 → 1 → banned.
+                $attemptsRemaining = max(0, $lockoutThreshold - max($recentFailures, $emailFailures) - 1);
+                jsonResponse([
+                    'success' => false,
+                    'message' => 'Invalid email or password. ' . ($attemptsRemaining > 0 ? "{$attemptsRemaining} attempt" . ($attemptsRemaining === 1 ? '' : 's') . " remaining before IP ban." : "Your IP will be banned on next failed attempt."),
+                    'error'   => 'Invalid email or password.',
+                    'attemptsRemaining' => $attemptsRemaining,
+                ], 401);
             }
 
             // ─── Successful Login — Regenerate & Bind ─────────────────────────

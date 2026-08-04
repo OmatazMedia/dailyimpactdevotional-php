@@ -41,7 +41,7 @@ export default function InstallPrompt() {
     sessionStorage.setItem("pwa-install-dismissed", "1");
   };
 
-  const [guideMode, setGuideMode] = useState<"ios" | "browser">("browser");
+  const [guideMode, setGuideMode] = useState<"ios" | "browser" | "desktop">("browser");
   const [guideOpen, setGuideOpen] = useState(false);
 
   const handleInstall = async () => {
@@ -51,7 +51,10 @@ export default function InstallPrompt() {
       setVisible(false);
     } else if (outcome === "unavailable") {
       // No native prompt available → show manual install steps instead.
-      setGuideMode(getPwaState().isIOS ? "ios" : "browser");
+      // Desktop browsers (Chrome/Edge) install from the address-bar icon;
+      // iOS Safari uses Share → Add to Home Screen; other mobiles use the menu.
+      const s = getPwaState();
+      setGuideMode(s.isIOS ? "ios" : s.isDesktop ? "desktop" : "browser");
       setGuideOpen(true);
       dismiss();
     }
@@ -71,7 +74,7 @@ export default function InstallPrompt() {
             Install Daily Impact
           </p>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
-            Get today's devotional as an app on your phone.
+            Get today's devotional as an app — installs on phone or desktop and works offline.
           </p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">

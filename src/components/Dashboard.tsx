@@ -39,7 +39,8 @@ import {
   Webhook,
   PanelLeftClose,
   PanelLeftOpen,
-  Ruler
+  Ruler,
+  BarChart3
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Devotional } from "../types";
@@ -49,6 +50,7 @@ import ImportDevotional from "./ImportDevotional";
 import ManageForeword from "./ManageForeword";
 import DonationSettings from "./DonationSettings";
 import PaymentsDashboard from "./PaymentsDashboard";
+import AnalyticsDashboard from "./AnalyticsDashboard";
 import EmailAuditPanel from "./EmailAuditPanel";
 import IdleTimeoutModal from "./IdleTimeoutModal";
 import { API_BASE } from "../config/api";
@@ -169,7 +171,7 @@ export default function Dashboard({
   
   // Dashboard Tabs: 'overview', 'add-devotional', 'manage-devotionals', 'header-images', 'user-management', 'settings', 'import-devotional', 'telegram-integration', 'foreword', 'payments'
   const [activeTab, setActiveTab] = useState<
-    "overview" | "add-devotional" | "manage-devotionals" | "header-images" | "user-management" | "settings" | "import-devotional" | "telegram-integration" | "foreword" | "payments"
+    "overview" | "add-devotional" | "manage-devotionals" | "header-images" | "user-management" | "settings" | "import-devotional" | "telegram-integration" | "foreword" | "payments" | "analytics"
   >("overview");
 
   const [isDevotionalOpen, setIsDevotionalOpen] = useState(true);
@@ -208,6 +210,12 @@ export default function Dashboard({
           // installation (previously a hardcoded "Dr. Andy Osakwe" survived).
           setProfileName(data.user.name || "Admin");
           setChangeEmail(data.user.email || "");
+
+          // Greet the freshly-logged-in admin by name (auto-dismisses).
+          const name = data.user.name || data.user.email || "Admin";
+          setWelcomeMsg(`Welcome back, ${name}! 👋`);
+          setWelcomeVisible(true);
+          setTimeout(() => setWelcomeVisible(false), 6000);
         } else {
           setUsers([]);
         }
@@ -283,6 +291,28 @@ export default function Dashboard({
   const [telegramConsoleLogs, setTelegramConsoleLogs] = useState<string[]>([]);
   const [dashboardSettings, setDashboardSettings] = useState<Record<string, string>>({});
 
+  // One-time per-mount greeting banner (dismisses itself after a few seconds).
+  const [welcomeMsg, setWelcomeMsg] = useState("");
+  const [welcomeVisible, setWelcomeVisible] = useState(false);
+
+  // Cron setup instruction modal on the Telegram page.
+  const [cronModalOpen, setCronModalOpen] = useState(false);
+  const [cronCopied, setCronCopied] = useState(false);
+
+  // ── Telegram credential persistence (localStorage mirror) ─────────────────
+  // The credentials live server-side, but some shared hosts fail to return
+  // them (session / encryption quirks). We ALSO mirror them to localStorage so
+  // the form re-fills instantly on reload or re-login; the server value (when
+  // actually present) always wins so the cache can never go stale.
+  const TG_CACHE_KEY = "dailyimpact_telegram_creds";
+  const readTgCache = (): Record<string, string> => {
+    try { return JSON.parse(localStorage.getItem(TG_CACHE_KEY) || "{}") as Record<string, string>; }
+    catch { return {}; }
+  };
+  const writeTgCache = (overrides: Record<string, string>) => {
+    try { localStorage.setItem(TG_CACHE_KEY, JSON.stringify({ ...readTgCache(), ...overrides })); } catch { /* best-effort */ }
+  };
+
   // ── Broadcast Scheduler states ────────────────────────────────────────────
   const [tgSchedMonth, setTgSchedMonth] = useState(() => {
     try {
@@ -290,6 +320,18 @@ export default function Dashboard({
     } catch { return "July"; }
   });
   const [tgSchedYear, setTgSchedYear] = useState<number>(() => {
+    try {
+      return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: "Africa/Lagos", year: 'numeric' }).format(new Date()), 10);
+    } catch { return new Date().getFullYear(); }
+  });
+  // Live Broadcast Testbed — its own month/year filter (independent of the
+  // scheduler's filter) so the test dropdown shows exactly the selected period.
+  const [tbMonth, setTbMonth] = useState<string>(() => {
+    try {
+      return new Intl.DateTimeFormat('en-US', { timeZone: "Africa/Lagos", month: 'long' }).format(new Date());
+    } catch { return "July"; }
+  });
+  const [tbYear, setTbYear] = useState<number>(() => {
     try {
       return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: "Africa/Lagos", year: 'numeric' }).format(new Date()), 10);
     } catch { return new Date().getFullYear(); }
@@ -309,16 +351,25 @@ export default function Dashboard({
       .catch(() => {});
   }, []);
 
-  // Seed the Telegram config fields from persisted server settings so a fresh
-  // login doesn't wipe the token/channel/mode (previously these were only
-  // component state and reset to defaults on every dashboard mount).
+  // Seed the Telegram config fields from persisted server settings (and the
+  // localStorage mirror) so a fresh login doesn't wipe the token/channel/mode
+  // (previously these were only component state and reset to defaults on
+  // every dashboard mount). The cache fills the fields immediately on mount;
+  // a non-empty server value then takes precedence.
   useEffect(() => {
-    if (dashboardSettings.telegram_bot_token !== undefined) setTelegramBotToken(dashboardSettings.telegram_bot_token || "");
-    if (dashboardSettings.telegram_channel_id !== undefined) setTelegramChannelId(dashboardSettings.telegram_channel_id || "");
-    if (dashboardSettings.telegram_enabled !== undefined) setTelegramEnabled(dashboardSettings.telegram_enabled === "true");
-    if (dashboardSettings.telegram_post_time !== undefined) setTelegramPostTime(dashboardSettings.telegram_post_time || "06:00");
-    if (dashboardSettings.telegram_footer_text !== undefined) setTelegramFooterText(dashboardSettings.telegram_footer_text || "");
-    if (dashboardSettings.telegram_schedule_mode !== undefined) setTelegramScheduleMode(dashboardSettings.telegram_schedule_mode || "scheduled");
+    const server = dashboardSettings;
+    const cache = readTgCache();
+    const pick = (key: string, fallback = "") => {
+      if (server[key] !== undefined && server[key] !== "") return server[key] as string;
+      if (cache[key] !== undefined && cache[key] !== "") return cache[key];
+      return fallback;
+    };
+    setTelegramBotToken(pick("telegram_bot_token"));
+    setTelegramChannelId(pick("telegram_channel_id"));
+    setTelegramEnabled(pick("telegram_enabled", "false") === "true");
+    setTelegramPostTime(pick("telegram_post_time", "06:00"));
+    setTelegramFooterText(pick("telegram_footer_text", "Join our Telegram channel for daily impact words!"));
+    setTelegramScheduleMode(pick("telegram_schedule_mode", "scheduled"));
   }, [dashboardSettings]);
 
   // Load the schedule log for the selected month/year whenever the Telegram
@@ -345,7 +396,7 @@ export default function Dashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, tgSchedMonth, tgSchedYear]);
 
-  // Load IP bans
+  // Load IP bans + recent failed login attempts (the "failed login track")
   useEffect(() => {
     const loadIpBans = async () => {
       try {
@@ -356,6 +407,16 @@ export default function Dashboard({
         }
       } catch (error) {
         console.error("Failed to load IP bans:", error);
+      }
+      try {
+        const res = await fetch(`${API_BASE}/login-log.php`);
+        if (res.ok) {
+          const data = await res.json();
+          // Keep only failures — successes are noise for the security track.
+          setFailedLogins(Array.isArray(data) ? data.filter((l: any) => !l.success) : []);
+        }
+      } catch (error) {
+        console.error("Failed to load login log:", error);
       }
     };
     loadIpBans();
@@ -397,6 +458,14 @@ export default function Dashboard({
         const errData = await res.json();
         showToast(errData.error || "Failed to create IP ban", "error");
       }
+      // Refresh the failed-attempt track too (a ban now exists for that IP).
+      try {
+        const res = await fetch(`${API_BASE}/login-log.php`);
+        if (res.ok) {
+          const data = await res.json();
+          setFailedLogins(Array.isArray(data) ? data.filter((l: any) => !l.success) : []);
+        }
+      } catch { /* non-fatal */ }
     } catch (error) {
       showToast("Failed to create IP ban", "error");
     } finally {
@@ -421,6 +490,14 @@ export default function Dashboard({
       } else {
         showToast("Failed to remove IP ban", "error");
       }
+      // Refresh the failed-attempt track after unbanning.
+      try {
+        const res = await fetch(`${API_BASE}/login-log.php`);
+        if (res.ok) {
+          const data = await res.json();
+          setFailedLogins(Array.isArray(data) ? data.filter((l: any) => !l.success) : []);
+        }
+      } catch { /* non-fatal */ }
     } catch (error) {
       showToast("Failed to remove IP ban", "error");
     }
@@ -493,6 +570,9 @@ export default function Dashboard({
     // Persist to API only — no localStorage fallback
     try {
       await apiPut(`${API_BASE}/settings.php`, settings);
+      // Mirror to localStorage so the form re-fills even if a later session
+      // check on the server can't return the secrets.
+      writeTgCache({ ...settings });
       showToast("Telegram settings saved to server!", "success");
     } catch {
       showToast("Failed to save settings to server.", "error");
@@ -520,6 +600,13 @@ export default function Dashboard({
     try {
       // First save settings so the server has the latest token/channel
       await apiPut(`${API_BASE}/settings.php`, {
+        telegram_bot_token: telegramBotToken,
+        telegram_channel_id: telegramChannelId,
+        telegram_footer_text: telegramFooterText,
+      });
+      // Mirror to localStorage so the fields survive reload / re-login even if
+      // the server session can't confirm the credentials on a later GET.
+      writeTgCache({
         telegram_bot_token: telegramBotToken,
         telegram_channel_id: telegramChannelId,
         telegram_footer_text: telegramFooterText,
@@ -655,6 +742,16 @@ export default function Dashboard({
       return !row || (row.status !== "scheduled" && row.status !== "sent");
     })
     .map(d => d.id);
+
+  // Devotionals for the TESTBED's own month/year filter.
+  const tbDevotionals = devotionals.filter(d => {
+    const parts = d.date.trim().split(/\s+/);
+    return parts.length >= 2 && parts[0].toLowerCase() === tbMonth.toLowerCase() && d.year === tbYear;
+  }).sort((a, b) => {
+    const dayA = parseInt(a.date.trim().split(/\s+/)[1] || "0", 10);
+    const dayB = parseInt(b.date.trim().split(/\s+/)[1] || "0", 10);
+    return dayA - dayB;
+  });
   // Header Image Mapping States
   const [mappedHeaders, setMappedHeaders] = useState<MappedHeader[]>([]);
   const [isSavingHeaders, setIsSavingHeaders] = useState(false);
@@ -1006,6 +1103,8 @@ export default function Dashboard({
   
   // IP Ban Management State
   const [ipBans, setIpBans] = useState<any[]>([]);
+  // Recent failed login attempts (security track shown next to active bans).
+  const [failedLogins, setFailedLogins] = useState<any[]>([]);
   const [newBanIp, setNewBanIp] = useState("");
   const [newBanReason, setNewBanReason] = useState("");
   const [newBanEmail, setNewBanEmail] = useState("");
@@ -1868,7 +1967,21 @@ export default function Dashboard({
               {!sidebarCollapsed && <span>Payments & Donations</span>}
             </button>
 
-            {/* MAIN CATEGORY 7: SETTINGS */}
+            {/* MAIN CATEGORY 7: WEBSITE ANALYTICS */}
+            <button
+              onClick={() => setActiveTab("analytics")}
+              title="Website Analytics"
+              className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center ${sidebarCollapsed ? "justify-center" : "gap-2.5"} transition-all ${
+                activeTab === "analytics"
+                  ? "bg-teal-brand text-white shadow-md shadow-teal-brand/10"
+                  : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 shrink-0" />
+              {!sidebarCollapsed && <span>Analytics</span>}
+            </button>
+
+            {/* MAIN CATEGORY 8: SETTINGS */}
             <button
               onClick={() => setActiveTab("settings")}
               title="Settings"
@@ -1918,6 +2031,36 @@ export default function Dashboard({
 
         {/* DASHBOARD RIGHT PAGE WORKSPACE */}
         <main className="flex-1 p-4 md:p-6 overflow-y-auto overflow-x-hidden w-full min-w-0">
+
+          {/* One-time welcome banner on entry */}
+          {welcomeVisible && welcomeMsg && (
+            <motion.div
+              initial={{ opacity: 0, y: -12, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12 }}
+              transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+              className="mb-4 p-3.5 rounded-2xl border border-teal-brand/25 bg-teal-brand/5 flex items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-teal-brand/15 text-teal-brand flex items-center justify-center shrink-0">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                  </svg>
+                </div>
+                <p className="text-xs font-black text-slate-800 dark:text-white truncate">{welcomeMsg}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWelcomeVisible(false)}
+                aria-label="Dismiss welcome"
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24">
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </motion.div>
+          )}
           
           {/* MOBILE TABS SLIDER HEADER */}
           <div className="flex md:hidden items-center gap-2 overflow-x-auto pb-4 mb-4 border-b border-slate-200 dark:border-slate-800 scrollbar-none select-none">
@@ -1976,6 +2119,14 @@ export default function Dashboard({
               }`}
             >
               Telegram
+            </button>
+            <button 
+              onClick={() => setActiveTab("analytics")} 
+              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
+                activeTab === "analytics" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+              }`}
+            >
+              Analytics
             </button>
           </div>
 
@@ -3666,6 +3817,40 @@ export default function Dashboard({
                                 )}
                               </div>
                             </div>
+
+                            {/* Failed Login Track — recent unsuccessful attempts */}
+                            <div className="space-y-2">
+                              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider">Failed Login Track ({failedLogins.length} recent)</span>
+                              <div className="max-h-44 overflow-y-auto space-y-1.5">
+                                {failedLogins.length === 0 ? (
+                                  <p className="text-[10px] text-slate-400 italic py-2">No failed login attempts recorded.</p>
+                                ) : (
+                                  failedLogins.slice(0, 25).map((log) => {
+                                    const ipMatch = ipBans.find(b => b.active && (b.ipAddress === log.ip || (log.ip && b.cidr && log.ip.startsWith(b.cidr.split("/")[0]))));
+                                    return (
+                                      <div key={log.id} className={`p-2.5 rounded-lg border flex items-start justify-between gap-2 ${
+                                        isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                                      }`}>
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300 truncate">{log.email || "(no email)"}</p>
+                                          <p className="text-[9px] font-mono text-slate-500 truncate">{log.ip} • {new Date(log.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</p>
+                                          <p className="text-[9px] text-slate-400 truncate">{log.location || "Location unknown"}</p>
+                                        </div>
+                                        {ipMatch ? (
+                                          <button
+                                            onClick={() => handleRemoveIpBan(ipMatch.id)}
+                                            className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white transition-colors shrink-0"
+                                            title={`Unban ${log.ip}`}
+                                          >
+                                            <CheckCircle className="w-3.5 h-3.5" />
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
 
@@ -4298,8 +4483,16 @@ export default function Dashboard({
                         </p>
                       </div>
 
-                      {/* Enabled Indicator toggle */}
+                      {/* Cron setup + Enabled Indicator toggle */}
                       <div className="flex items-center gap-3 self-start sm:self-auto">
+                        <button
+                          type="button"
+                          onClick={() => setCronModalOpen(true)}
+                          className="inline-flex items-center gap-1.5 py-2 px-3 rounded-xl border border-amber-500/30 bg-amber-500/5 text-amber-600 dark:text-amber-400 text-[10px] font-black uppercase tracking-wider hover:bg-amber-500/10 transition-all"
+                        >
+                          <Clock className="w-3.5 h-3.5" />
+                          Cron Setup
+                        </button>
                         <span className={`text-[10px] font-black uppercase tracking-wider ${telegramEnabled ? "text-emerald-500" : "text-slate-400"}`}>
                           {telegramEnabled ? "● Service Active" : "○ Service Paused"}
                         </span>
@@ -4308,6 +4501,9 @@ export default function Dashboard({
                           onClick={() => {
                             const val = !telegramEnabled;
                             setTelegramEnabled(val);
+                            // Persist immediately so the switch survives reload.
+                            writeTgCache({ telegram_enabled: val ? "true" : "false" });
+                            apiPut(`${API_BASE}/settings.php`, { telegram_enabled: val ? "true" : "false" }).catch(() => {});
                             showToast(val ? "Telegram Automation enabled!" : "Telegram Automation paused.", "info");
                           }}
                           className={`w-11 h-6 rounded-full p-0.5 transition-colors focus:outline-none ${
@@ -4529,7 +4725,37 @@ export default function Dashboard({
                           Verify your bot tokens and channel connections before turning on live scheduler. Select any uploaded devotional to run a trial send.
                         </p>
 
-                        {/* Devotional picker */}
+                        {/* Month / Year filter for the testbed */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">Month</label>
+                            <select
+                              value={tbMonth}
+                              onChange={(e) => { setTbMonth(e.target.value); setSelectedTestDevId(""); }}
+                              className={`w-full py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${
+                                isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                              }`}
+                            >
+                              {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">Year</label>
+                            <select
+                              value={tbYear}
+                              onChange={(e) => { setTbYear(parseInt(e.target.value, 10)); setSelectedTestDevId(""); }}
+                              className={`w-full py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${
+                                isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                              }`}
+                            >
+                              {Array.from(new Set([...devotionals.map(d => d.year), new Date().getFullYear(), new Date().getFullYear() + 1])).sort((a, b) => b - a).map(y => (
+                                <option key={y} value={y}>{y}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Devotional picker (shows the selected month/year only) */}
                         <div className="space-y-1.5">
                           <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
                             Select Devotional to Broadcast
@@ -4542,13 +4768,13 @@ export default function Dashboard({
                             }`}
                           >
                             <option value="">-- Choose Devotional --</option>
-                            {tgMonthDevotionals.map(d => (
+                            {tbDevotionals.map(d => (
                               <option key={d.id} value={d.id}>
                                 {d.date} - {d.title}
                               </option>
                             ))}
-                            {tgMonthDevotionals.length === 0 && (
-                              <option value="" disabled>No devotionals for {tgSchedMonth} {tgSchedYear}</option>
+                            {tbDevotionals.length === 0 && (
+                              <option value="" disabled>No devotionals for {tbMonth} {tbYear}</option>
                             )}
                           </select>
                         </div>
@@ -4787,6 +5013,114 @@ export default function Dashboard({
                     </div>
                   </div>
 
+                  {/* ── CRON JOB SETUP INSTRUCTION MODAL ── */}
+                  {cronModalOpen && (
+                    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setCronModalOpen(false)}
+                        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                      />
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                        className={`relative w-full max-w-lg rounded-2xl overflow-hidden border shadow-2xl flex flex-col max-h-[90vh] ${
+                          isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-950"
+                        }`}
+                      >
+                        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-950/20">
+                          <h3 className="font-serif text-base font-black uppercase tracking-tight flex items-center gap-2">
+                            <Clock className="w-4.5 h-4.5 text-amber-500" />
+                            Automatic Sending — Cron Setup
+                          </h3>
+                          <button
+                            type="button"
+                            onClick={() => setCronModalOpen(false)}
+                            className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        <div className="p-6 overflow-y-auto space-y-5 text-xs font-semibold leading-relaxed">
+                          <p className="text-slate-500 dark:text-slate-400">
+                            The scheduler (<code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 rounded text-[10px]">backend/api/telegram-cron.php</code>)
+                            delivers each scheduled devotional automatically on its own date at the configured time.
+                            On your live server it needs a <b>cron job</b> that runs it every minute.
+                          </p>
+
+                          {/* Option A: PHP CLI (recommended) */}
+                          <div className={`p-4 rounded-xl border space-y-2 ${
+                            isDarkMode ? "bg-slate-950/50 border-slate-800" : "bg-slate-50 border-slate-200"
+                          }`}>
+                            <p className="font-black uppercase tracking-wider text-teal-brand text-[10px]">Option A — cPanel (recommended)</p>
+                            <ol className="list-decimal list-inside space-y-1.5 text-slate-600 dark:text-slate-300">
+                              <li>Log in to cPanel and open <b>Cron Jobs</b>.</li>
+                              <li>Set <b>Once Per Minute</b> (<code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 rounded text-[10px]">* * * * *</code>).</li>
+                              <li>Paste this command (replace <b>USERNAME</b> with your cPanel username):</li>
+                            </ol>
+                            <div className="flex items-center gap-2 mt-1">
+                              <code className="flex-1 font-mono text-[10px] bg-slate-950 text-emerald-400 border border-slate-800 rounded-lg px-3 py-2.5 overflow-x-auto whitespace-nowrap">
+                                php /home/USERNAME/public_html/backend/api/telegram-cron.php
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText("php /home/USERNAME/public_html/backend/api/telegram-cron.php").catch(() => {});
+                                  setCronCopied(true);
+                                  setTimeout(() => setCronCopied(false), 2000);
+                                }}
+                                className="shrink-0 px-3 py-2.5 rounded-lg border border-teal-brand/20 bg-teal-brand/5 text-teal-brand text-[10px] font-black uppercase tracking-wider hover:bg-teal-brand hover:text-white transition-all"
+                              >
+                                {cronCopied ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                            <p className="text-slate-500 dark:text-slate-400">
+                              Click <b>Add New Cron Job</b>. Done — devotionals now post themselves at the configured time.
+                            </p>
+                          </div>
+
+                          {/* Option B: URL */}
+                          <div className={`p-4 rounded-xl border space-y-2 ${
+                            isDarkMode ? "bg-slate-950/50 border-slate-800" : "bg-slate-50 border-slate-200"
+                          }`}>
+                            <p className="font-black uppercase tracking-wider text-amber-500 text-[10px]">Option B — URL (any host)</p>
+                            <p className="text-slate-600 dark:text-slate-300">
+                              If your host cannot run PHP via cron, call the endpoint with curl every minute (replace <b>YOURDOMAIN.com</b>):
+                            </p>
+                            <code className="block font-mono text-[10px] bg-slate-950 text-emerald-400 border border-slate-800 rounded-lg px-3 py-2.5 overflow-x-auto whitespace-nowrap">
+                              curl -s "https://YOURDOMAIN.com/backend/api/telegram-cron.php" &gt;/dev/null 2&gt;&amp;1
+                            </code>
+                          </div>
+
+                          <div className={`p-3 rounded-xl border ${
+                            isDarkMode ? "bg-amber-500/5 border-amber-500/20" : "bg-amber-500/5 border-amber-500/20"
+                          }`}>
+                            <p className="text-amber-600 dark:text-amber-400 font-bold">
+                              ⚠ Before the cron can post:
+                            </p>
+                            <ul className="list-disc list-inside mt-1.5 space-y-1 text-slate-600 dark:text-slate-300">
+                              <li>Save your Bot Token + Channel ID and press <b>Verify</b> (must succeed).</li>
+                              <li>The <b>Service Active</b> toggle must be ON.</li>
+                              <li>Devotionals must be <b>scheduled</b> in the Broadcast Scheduler above (or auto-scheduled on upload).</li>
+                            </ul>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => setCronModalOpen(false)}
+                            className="w-full py-2.5 rounded-xl bg-teal-brand text-white text-xs font-black uppercase tracking-widest hover:opacity-90 transition-all"
+                          >
+                            Got it
+                          </button>
+                        </div>
+                      </motion.div>
+                    </div>
+                  )}
+
                   {/* High Fidelity Technical Architecture Explanation for Backend */}
                   <div className={`p-6 rounded-2xl border space-y-4 ${
                     isDarkMode ? "bg-slate-900/50 border-slate-800 text-slate-100" : "bg-slate-50/50 border-slate-200 text-slate-900"
@@ -4854,6 +5188,11 @@ export default function Dashboard({
               {/* VIEW 9: PAYMENTS & DONATIONS */}
               {activeTab === "payments" && (
                 <PaymentsDashboard isDarkMode={isDarkMode} onShowToast={showToast} />
+              )}
+
+              {/* VIEW 10: WEBSITE ANALYTICS */}
+              {activeTab === "analytics" && (
+                <AnalyticsDashboard isDarkMode={isDarkMode} onShowToast={showToast} />
               )}
 
             </motion.div>

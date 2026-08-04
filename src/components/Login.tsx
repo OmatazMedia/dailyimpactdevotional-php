@@ -45,6 +45,12 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
   // Step-by-step login flow
   const [loginStep, setLoginStep] = useState<"email" | "password">("email");
   const [attemptsRemaining, setAttemptsRemaining] = useState(3);
+  // Set when the server returns a 403 IP-ban — replaces the form with a clear
+  // "you are banned" notice instead of a generic error message.
+  const [bannedMessage, setBannedMessage] = useState("");
+  // When a failed attempt carries the server's countdown, remember that a
+  // warning is owed so the amber "X attempts left" banner shows right away.
+  const [showAttemptWarning, setShowAttemptWarning] = useState(false);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,18 +80,28 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
         if (json.success && json.step === "password") {
           setAttemptsRemaining(json.attemptsRemaining || 3);
           setLoginStep("password");
-          // NOTE: the server deliberately advances to the password step for ANY
-          // email (anti-enumeration — it never reveals whether an email exists).
-          // So this message must NOT claim the email was "verified".
-          setSuccessMessage("Enter your password to continue.");
-          setTimeout(() => setSuccessMessage(""), 2000);
+          // The server only advances to the password step when the email is
+          // registered, so we can truthfully tell the user it was recognised.
+          setSuccessMessage("Email verified — enter your password.");
+          setTimeout(() => setSuccessMessage(""), 2500);
         } else {
           setErrorMessage("Login failed.");
         }
         setIsLoading(false);
       } catch (e) {
-        const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
-        setErrorMessage(msg);
+        if (e instanceof ApiError && e.status === 403) {
+          // IP has been banned — show the dedicated banned screen.
+          setBannedMessage(e.message || "Your IP address has been banned. Contact an administrator.");
+        } else {
+          const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
+          setErrorMessage(msg);
+          // Surface the server's countdown ("2 attempts left → 1 → banned").
+          const body = e instanceof ApiError ? (e.body as { attemptsRemaining?: number } | null) : null;
+          if (body && typeof body.attemptsRemaining === "number") {
+            setAttemptsRemaining(Math.max(0, body.attemptsRemaining));
+            setShowAttemptWarning(true);
+          }
+        }
         setIsLoading(false);
       }
     } else {
@@ -118,8 +134,18 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
           setIsLoading(false);
         }
       } catch (e) {
-        const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
-        setErrorMessage(msg);
+        if (e instanceof ApiError && e.status === 403) {
+          setBannedMessage(e.message || "Your IP address has been banned. Contact an administrator.");
+        } else {
+          const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
+          setErrorMessage(msg);
+          // Same countdown surface as the email step.
+          const body = e instanceof ApiError ? (e.body as { attemptsRemaining?: number } | null) : null;
+          if (body && typeof body.attemptsRemaining === "number") {
+            setAttemptsRemaining(Math.max(0, body.attemptsRemaining));
+            setShowAttemptWarning(true);
+          }
+        }
         setIsLoading(false);
       }
     }
@@ -267,8 +293,59 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
           )}
         </AnimatePresence>
 
-        {/* ── RESET PASSWORD (from emailed link) ── */}
-        {resetToken ? (
+        {/* Countdown warning: "2 attempts left → 1 → banned" — rendered
+            outside AnimatePresence so it can appear together with the error. */}
+        {showAttemptWarning && !bannedMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`mb-4 p-3 rounded-xl border text-xs font-bold flex items-start gap-2 ${
+              attemptsRemaining === 0
+                ? "bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400"
+                : "bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400"
+            }`}
+          >
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
+            <span>
+              {attemptsRemaining === 0
+                ? "⚠️ Final warning — your IP will be banned after this next failed attempt. Contact the administrator if this is a mistake."
+                : attemptsRemaining === 1
+                  ? "⚠️ 1 attempt left — your IP will be banned after that."
+                  : `⚠️ ${attemptsRemaining} attempts left — your IP will be banned afterwards.`}
+            </span>
+          </motion.div>
+        )}
+
+        {/* ── BANNED SCREEN — shown when the server bans this IP ── */}
+        {bannedMessage ? (
+          <div className="py-2 text-center space-y-4">
+            <div className="w-14 h-14 rounded-full bg-rose-500/15 text-rose-500 flex items-center justify-center mx-auto">
+              <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636M3 8l3-3m-3 3l3 3m12-6l3 3m-3-3l3-3M9 21h6" />
+              </svg>
+            </div>
+            <h2 className="font-serif text-lg font-black text-rose-600 dark:text-rose-400">
+              Access Blocked
+            </h2>
+            <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+              {bannedMessage}
+            </p>
+            <div className={`p-3 rounded-xl border text-left text-[10px] leading-relaxed ${
+              isDarkMode ? "bg-slate-950/60 border-slate-800 text-slate-400" : "bg-slate-50 border-slate-200 text-slate-500"
+            }`}>
+              <span className="font-black uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-1">What can I do?</span>
+              Your IP address was automatically banned after repeated failed login attempts.
+              Wait for the ban to expire (see the message above) or contact the site administrator
+              to have it lifted. Continued attempts will not work while the ban is active.
+            </div>
+            <button
+              type="button"                  onClick={() => { setBannedMessage(""); setLoginStep("email"); setErrorMessage(""); setShowAttemptWarning(false); setAttemptsRemaining(3); }}
+              className="w-full py-2 text-xs font-bold text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
+            >
+              Back to sign in
+            </button>
+          </div>
+        ) : resetToken ? (
           <div className="space-y-4">
             {resetDone ? (
               <div className="py-6 text-center space-y-3">

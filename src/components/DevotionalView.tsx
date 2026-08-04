@@ -425,11 +425,9 @@ export default function DevotionalView({
       <header className="text-center mb-8">
         <p className="text-slate-600 dark:text-slate-400 font-sans font-extrabold text-xs md:text-sm uppercase tracking-widest mb-4">
           {devotional.date}, {devotional.year}
-        </p>
-
-        <h2 className="font-serif text-3xl md:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight max-w-3xl mx-auto text-slate-900 dark:text-white">
-          {devotional.title}
-        </h2>
+        </p>          <h2 className="font-serif text-3xl md:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight max-w-3xl mx-auto text-slate-900 dark:text-white break-words text-balance">
+            {devotional.title}
+          </h2>
         
         <div className="w-16 h-[2px] bg-slate-900 dark:bg-white mx-auto mt-4 mb-8 rounded-full" />
       </header>
@@ -484,7 +482,7 @@ export default function DevotionalView({
           <img
             src={activeImageUrl || "/assets/images/devotional-title-jan.jpg"}
             alt="Daily Impact Devotional Title Banner"
-            className="w-full h-full object-contain object-center transition-transform duration-700 ease-out group-hover:scale-[1.015]"
+            className="w-full h-full object-cover object-center transition-transform duration-700 ease-out group-hover:scale-[1.015]"
             referrerPolicy="no-referrer"
           />
         </div>
@@ -731,7 +729,7 @@ export default function DevotionalView({
                       <img
                         src={activeImageUrl || "/assets/images/devotional-title-jan.jpg"}
                         alt={devotional.title}
-                        className="w-full h-full object-contain"
+                        className="w-full h-full object-cover object-center"
                         referrerPolicy="no-referrer"
                       />
                     </div>

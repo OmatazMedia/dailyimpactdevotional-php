@@ -24,6 +24,8 @@ const HEADERS_FILE = path.join(DATA_DIR, "mapped_headers.json");
 const FOREWORD_FILE = path.join(DATA_DIR, "foreword.json");
 const DONATIONS_FILE = path.join(DATA_DIR, "donations.json");
 const LOGIN_LOG_FILE = path.join(DATA_DIR, "login_log.json");
+const ADMIN_FILE = path.join(DATA_DIR, "admin.json");
+const ANALYTICS_FILE = path.join(DATA_DIR, "analytics.json");
 
 // Ensure all data directories exist on startup
 [DATA_DIR, UPLOADS_DIR].forEach((dir) => {
@@ -364,6 +366,343 @@ app.post("/api/webhook/payment", async (req: Request, res: Response) => {
   }
 
   res.json({ success: true });
+});
+
+// ─── ADMIN AUTH (mock of backend/api/admin.php) ─────────────────────────────────
+// The real production backend uses PHP sessions; this mock uses a signed
+// session token cookie so the Publisher Portal is fully testable locally.
+// Credentials live in src/data/admin.json (created on first run).
+const ADMIN_SESSION_TTL_MS = 60 * 60 * 1000; // 60 min idle
+const adminSessions = new Map<string, { email: string; name: string; lastSeen: number }>();
+// Per-IP failed-attempt counter for the local login countdown (mirrors the PHP
+// login_logs-based logic). Cleared on successful login.
+const MOCK_LOGIN_THRESHOLD = 3;
+const loginFailures = new Map<string, number>();
+
+interface AdminRecord { email: string; password: string; name: string; }
+
+function readAdmin(): AdminRecord {
+  const fallback: AdminRecord = { email: "admin@ministries.org", password: "admin123", name: "Admin" };
+  const data = readJson<Partial<AdminRecord> | null>(ADMIN_FILE, null);
+  if (!data || typeof data.email !== "string" || !data.email) return fallback;
+  return {
+    email: data.email,
+    password: typeof data.password === "string" ? data.password : "admin123",
+    name: typeof data.name === "string" ? data.name : "Admin",
+  };
+}
+
+function parseCookies(header?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function getSessionUser(req: Request): AdminRecord & { email: string; name: string } | null {
+  const token = parseCookies(req.headers.cookie)["did_admin"];
+  if (!token) return null;
+  const s = adminSessions.get(token);
+  if (!s) return null;
+  if (Date.now() - s.lastSeen > ADMIN_SESSION_TTL_MS) {
+    adminSessions.delete(token);
+    return null;
+  }
+  s.lastSeen = Date.now();
+  const admin = readAdmin();
+  return { email: s.email, name: s.name, password: admin.password };
+}
+
+app.get("/api/admin", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  if (action === "check") {
+    const user = getSessionUser(req);
+    res.json(user ? { loggedIn: true, user: { email: user.email, name: user.name } } : { loggedIn: false, user: null });
+    return;
+  }
+  if (action === "list-users") {
+    const user = getSessionUser(req);
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const admin = readAdmin();
+    res.json({ success: true, users: [{ id: "1", name: admin.name, email: admin.email, role: "Administrator", status: "Active", createdAt: "" }] });
+    return;
+  }
+  res.status(400).json({ error: "Invalid action. Use: check, or list-users" });
+});
+
+app.post("/api/admin", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  const body = (req.body ?? {}) as { email?: string; password?: string; step?: string; id?: string };
+
+  if (action === "login") {
+    const email = String(body.email ?? "").trim().toLowerCase();
+    const admin = readAdmin();
+    const matchesEmail = email !== "" && admin.email.toLowerCase() === email;
+    const ip = String(req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ?? req.socket.remoteAddress ?? "local");
+    // Countdown mirror of the PHP backend: N failed attempts → ban.
+    const attempts = (loginFailures.get(ip) ?? 0);
+
+    // Record a failed attempt into login_log.json (mirrors admin.php's
+    // INSERT INTO login_logs ... success = 0) so the Dashboard's Failed
+    // Login Track shows real data while developing locally.
+    const recordLoginFailure = () => {
+      const ua = String(req.headers["user-agent"] ?? "Unknown");
+      const log = readJson<LoginLogEntry[]>(LOGIN_LOG_FILE, []);
+      log.push({ id: generateId(), email, timestamp: new Date().toISOString(), ip, userAgent: ua, success: false, location: "Unknown" });
+      if (log.length > 500) log.splice(0, log.length - 500);
+      writeJson(LOGIN_LOG_FILE, log);
+    };
+
+    // Step 1 — email gate: only advance for a registered email.
+    if (String(body.step ?? "password") === "email") {
+      if (!matchesEmail) {
+        recordLoginFailure();
+        loginFailures.set(ip, attempts + 1);
+        const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
+        if (remaining <= 0) {
+          res.status(403).json({ success: false, error: "Too many failed attempts. Your IP has been banned for 15 minutes. Contact an administrator if this is an error.", banned: true, attemptsRemaining: 0 });
+        } else {
+          res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
+        }
+        return;
+      }
+      res.json({ success: true, step: "password", emailValid: true, attemptsRemaining: 3 });
+      return;
+    }
+
+    // Step 2 — password.
+    if (!matchesEmail) {
+      recordLoginFailure();
+      loginFailures.set(ip, attempts + 1);
+      const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1) - 1);
+      res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
+      return;
+    }
+    if (!body.password || body.password.length < 6) {
+      res.status(401).json({ success: false, error: "Invalid email or password." });
+      return;
+    }
+    if (body.password !== admin.password) {
+      recordLoginFailure();
+      loginFailures.set(ip, attempts + 1);
+      const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
+      if (remaining <= 0) {
+        res.status(403).json({ success: false, error: "Too many failed attempts. Your IP has been banned for 15 minutes. Contact an administrator if this is an error.", banned: true, attemptsRemaining: 0 });
+      } else {
+        res.status(401).json({ success: false, error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before IP ban.`, attemptsRemaining: remaining });
+      }
+      return;
+    }
+    // Success clears the failure counter for this IP.
+    loginFailures.delete(ip);
+
+    const token = generateId() + generateId();
+    adminSessions.set(token, { email: admin.email, name: admin.name, lastSeen: Date.now() });
+    res.setHeader("Set-Cookie", `did_admin=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`);
+    res.json({ success: true, user: { email: admin.email, name: admin.name, role: "Administrator" } });
+    return;
+  }
+
+  if (action === "logout") {
+    const token = parseCookies(req.headers.cookie)["did_admin"];
+    if (token) adminSessions.delete(token);
+    res.setHeader("Set-Cookie", `did_admin=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    res.json({ success: true });
+    return;
+  }
+
+  res.status(400).json({ error: "Invalid action. Use: login, logout" });
+});
+
+// ─── WEBSITE ANALYTICS (mock of backend/api/analytics.php) ────────────────────────
+interface AnalyticsVisit {
+  id: string;
+  sessionId: string;
+  page: string;
+  referrer: string;
+  locale: string;
+  country: string;
+  device: string;
+  userAgent: string;
+  isNew: boolean;
+  visitedAt: string; // ISO
+  lastActiveAt: string;
+  durationSeconds: number;
+}
+
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function readAnalytics(): AnalyticsVisit[] {
+  return readJson<AnalyticsVisit[]>(ANALYTICS_FILE, []);
+}
+
+function writeAnalytics(rows: AnalyticsVisit[]): void {
+  // Keep the file bounded.
+  if (rows.length > 5000) rows = rows.slice(rows.length - 5000);
+  writeJson(ANALYTICS_FILE, rows);
+}
+
+function mockGeo(ip: string): { country: string; city: string } {
+  if (ip === "unknown" || ip === "::1" || ip.startsWith("127.") || ip.startsWith("192.168.")) {
+    return { country: "Local / Nigeria (dev)", city: "Localhost" };
+  }
+  return { country: "Unknown", city: "" };
+}
+
+app.get("/api/analytics", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+
+  if (action === "ranges") {
+    const rows = readAnalytics();
+    const seen = new Set<string>();
+    const ranges: { year: number; month: string }[] = [];
+    for (const r of rows) {
+      const d = new Date(r.visitedAt);
+      const key = `${d.getFullYear()}-${d.getMonth()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ranges.push({ year: d.getFullYear(), month: MONTH_NAMES[d.getMonth()] });
+    }
+    res.json({ success: true, ranges });
+    return;
+  }
+
+  if (action === "summary") {
+    const rows = readAnalytics();
+    let month = String(req.query.month ?? "").toLowerCase();
+    let year = parseInt(String(req.query.year ?? "0"), 10);
+
+    // Default to the most recent month with data.
+    if (!MONTH_NAMES.some(m => m.toLowerCase() === month) || !year) {
+      const latest = rows.reduce<string | null>((acc, r) => (acc === null || r.visitedAt > acc ? r.visitedAt : acc), null);
+      if (latest) {
+        const d = new Date(latest);
+        month = MONTH_NAMES[d.getMonth()].toLowerCase();
+        year = d.getFullYear();
+      } else {
+        const now = new Date();
+        month = MONTH_NAMES[now.getMonth()].toLowerCase();
+        year = now.getFullYear();
+      }
+    }
+
+    const inMonth = rows.filter(r => {
+      const d = new Date(r.visitedAt);
+      return MONTH_NAMES[d.getMonth()].toLowerCase() === month && d.getFullYear() === year;
+    });
+
+    const sessions = new Set(inMonth.map(r => r.sessionId));
+    const perDayMap: Record<number, number> = {};
+    const locales: Record<string, number> = {};
+    const countries: Record<string, number> = {};
+    const devices: Record<string, number> = {};
+    const pages: Record<string, number> = {};
+    let durationSum = 0;
+    let durationCount = 0;
+
+    for (const r of inMonth) {
+      perDayMap[new Date(r.visitedAt).getDate()] = (perDayMap[new Date(r.visitedAt).getDate()] || 0) + 1;
+      if (r.locale) locales[r.locale] = (locales[r.locale] || 0) + 1;
+      if (r.country) countries[r.country] = (countries[r.country] || 0) + 1;
+      devices[r.device || "desktop"] = (devices[r.device || "desktop"] || 0) + 1;
+      if (r.page) pages[r.page] = (pages[r.page] || 0) + 1;
+      const dur = r.durationSeconds || Math.max(0, Math.round((new Date(r.lastActiveAt).getTime() - new Date(r.visitedAt).getTime()) / 1000));
+      if (dur > 0) { durationSum += dur; durationCount++; }
+    }
+
+    const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase() === month);
+    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+    const perDay = Array.from({ length: daysInMonth }, (_, i) => ({ day: i + 1, visits: perDayMap[i + 1] || 0 }));
+
+    const sortEntries = (map: Record<string, number>) =>
+      Object.entries(map).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ key: k, visits: v }));
+
+    res.json({
+      success: true,
+      month: month.charAt(0).toUpperCase() + month.slice(1),
+      year,
+      totalVisits: inMonth.length,
+      uniqueVisitors: sessions.size,
+      avgDurationSec: durationCount ? Math.round(durationSum / durationCount) : 0,
+      perDay,
+      locales: sortEntries(locales).map(e => ({ locale: e.key, visits: e.visits })),
+      countries: sortEntries(countries).map(e => ({ country: e.key, visits: e.visits })),
+      devices: sortEntries(devices).map(e => ({ device: e.key, visits: e.visits })),
+      pages: sortEntries(pages).map(e => ({ page: e.key, visits: e.visits })),
+      recent: [...inMonth]
+        .sort((a, b) => b.visitedAt.localeCompare(a.visitedAt))
+        .slice(0, 15)
+        .map(r => ({ id: r.id, page: r.page, referrer: r.referrer, locale: r.locale, country: r.country, city: "", device: r.device, duration: r.durationSeconds, visitedAt: r.visitedAt, isNew: r.isNew })),
+    });
+    return;
+  }
+
+  res.status(400).json({ error: "Invalid action. Use: summary, or ranges" });
+});
+
+app.post("/api/analytics", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  const body = (req.body ?? {}) as { sessionId?: string; page?: string; referrer?: string; locale?: string; device?: string; durationSeconds?: number };
+  const sessionId = String(body.sessionId ?? "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+  if (!sessionId) { res.status(400).json({ error: "sessionId is required" }); return; }
+
+  let rows = readAnalytics();
+  const existing = rows.find(r => r.sessionId === sessionId);
+  const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+
+  if (action === "visit") {
+    if (existing) {
+      existing.page = String(body.page ?? existing.page).slice(0, 255);
+      existing.lastActiveAt = new Date().toISOString();
+      writeAnalytics(rows);
+      res.json({ success: true, isNew: false });
+      return;
+    }
+    const geo = mockGeo(ip);
+    const now = new Date().toISOString();
+    rows.push({
+      id: generateId(),
+      sessionId,
+      page: String(body.page ?? "/").slice(0, 255),
+      referrer: String(body.referrer ?? "").slice(0, 500),
+      locale: String(body.locale ?? "").slice(0, 50),
+      country: geo.country,
+      device: ["mobile", "tablet", "desktop"].includes(String(body.device ?? "")) ? String(body.device) : "desktop",
+      userAgent: "",
+      isNew: true,
+      visitedAt: now,
+      lastActiveAt: now,
+      durationSeconds: 0,
+    });
+    writeAnalytics(rows);
+    res.status(201).json({ success: true, isNew: true });
+    return;
+  }
+
+  if (action === "heartbeat") {
+    if (existing) existing.lastActiveAt = new Date().toISOString();
+    writeAnalytics(rows);
+    res.json({ success: true });
+    return;
+  }
+
+  if (action === "leave") {
+    if (existing) {
+      existing.lastActiveAt = new Date().toISOString();
+      const reported = Math.max(0, Math.round(Number(body.durationSeconds ?? 0)));
+      const elapsed = Math.round((Date.now() - new Date(existing.visitedAt).getTime()) / 1000) + 5;
+      existing.durationSeconds = Math.max(existing.durationSeconds, Math.min(reported, elapsed));
+    }
+    writeAnalytics(rows);
+    res.json({ success: true });
+    return;
+  }
+
+  res.status(400).json({ error: "Invalid action. Use: visit, heartbeat, or leave" });
 });
 
 // ─── LOGIN AUDIT LOG & EMAIL NOTIFICATIONS ───────────────────────────────────────

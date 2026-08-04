@@ -22,7 +22,10 @@ export default defineConfig(() => {
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // src/data/** holds the mock server's JSON files (settings, analytics, ...)
+      // which are never imported by the app — ignoring them prevents full-page
+      // reloads every time the analytics heartbeat writes a visit row.
+      watch: process.env.DISABLE_HMR === 'true' ? null : { ignored: ['**/src/data/**'] },
     },
   };
 });

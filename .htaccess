@@ -28,6 +28,15 @@ RewriteRule ^docs/ - [F,L]
 # the SPA index.html fallback below.
 RewriteRule ^backend/ - [L]
 
+# ─── SOCIAL SHARE PREVIEWS (Open Graph) ─────────────────────────────────────
+# When a shared devotional link (/?devotional=ID) is fetched by a social-media
+# crawler, serve dynamic OG meta tags from backend/api/og.php so WhatsApp,
+# Telegram, Facebook and Twitter/X show the devotional's OWN banner image and
+# title in the preview card. Real browsers (no matching UA) continue to the SPA.
+RewriteCond %{QUERY_STRING} (^|&)devotional=[^&]+ [NC]
+RewriteCond %{HTTP_USER_AGENT} (facebookexternalhit|Facebot|Twitterbot|WhatsApp|TelegramBot|LinkedInBot|Slackbot|Discordbot|Pinterest|vkShare|redditbot|Applebot|Googlebot) [NC]
+RewriteRule ^$ /backend/api/og.php [L,QSA]
+
 # ─── FILE UPLOADS ───────────────────────────────────────────────────────────
 # Serve uploaded files directly (real files are served by the -f rule below).
 # RewriteCond %{REQUEST_URI} ^/uploads/

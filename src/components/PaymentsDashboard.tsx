@@ -40,6 +40,9 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [providerFilter, setProviderFilter] = useState<string>("ALL");
   const [searchTerm, setSearchTerm] = useState("");
+  // Prominent display switch: show everything, only Naira, or only Dollar.
+  // Every view (stats, chart, table) and both exports respect this switch.
+  const [displayCurrency, setDisplayCurrency] = useState<"ALL" | "NGN" | "USD">("ALL");
 
   const loadDonations = async () => {
     setIsLoading(true);
@@ -69,13 +72,14 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
   const filtered = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
     return donations.filter(d => {
+      if (displayCurrency !== "ALL" && d.currency !== displayCurrency) return false;
       if (currencyFilter !== "ALL" && d.currency !== currencyFilter) return false;
       if (statusFilter !== "ALL" && d.status !== statusFilter) return false;
       if (providerFilter !== "ALL" && d.provider !== providerFilter) return false;
       if (q && !`${d.name} ${d.email} ${d.reference}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [donations, currencyFilter, statusFilter, providerFilter, searchTerm]);
+  }, [donations, displayCurrency, currencyFilter, statusFilter, providerFilter, searchTerm]);
 
   const successful = filtered.filter(d => d.status === "success");
   const totalsByCurrency = useMemo(() => {
@@ -245,6 +249,33 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
         </div>
       </div>
 
+      {/* Currency display switch — the chosen currency drives everything below */}
+      <div className={`${cardBase} !py-3.5 flex flex-wrap items-center justify-between gap-3`}>
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+          <DollarSign className="w-3.5 h-3.5" />
+          View donations in
+        </span>
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+          {(["ALL", "NGN", "USD"] as const).map(c => (
+            <button
+              key={c}
+              onClick={() => setDisplayCurrency(c)}
+              className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider transition-all ${
+                displayCurrency === c
+                  ? c === "NGN"
+                    ? "bg-emerald-500 text-white shadow-sm"
+                    : c === "USD"
+                      ? "bg-sky-500 text-white shadow-sm"
+                      : "bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+              }`}
+            >
+              {c === "ALL" ? "All" : c === "NGN" ? "₦ Naira" : "$ Dollar"}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className={cardBase}>
@@ -253,12 +284,16 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
           </div>
           <div>
             <p className="text-xl font-black text-slate-900 dark:text-white">
-              {Object.entries(totalsByCurrency).map(([c, v]) => (
-                <span key={c} className="mr-2">{currencySymbol(c)}{v.toLocaleString()}</span>
-              ))}
-              {Object.keys(totalsByCurrency).length === 0 && "—"}
+              {displayCurrency !== "ALL"
+                ? (totalsByCurrency[displayCurrency]
+                    ? `${currencySymbol(displayCurrency)}${totalsByCurrency[displayCurrency].toLocaleString()}`
+                    : `${currencySymbol(displayCurrency)}0`)
+                : (Object.entries(totalsByCurrency).map(([c, v]) => (
+                    <span key={c} className="mr-2">{currencySymbol(c)}{v.toLocaleString()}</span>
+                  )))}
+              {displayCurrency === "ALL" && Object.keys(totalsByCurrency).length === 0 && "—"}
             </p>
-            <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">Received</p>
+            <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">Received {displayCurrency !== "ALL" ? `(${displayCurrency})` : ""}</p>
           </div>
         </div>
         <div className={cardBase}>

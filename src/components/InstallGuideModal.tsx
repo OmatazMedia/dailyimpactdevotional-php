@@ -4,8 +4,8 @@ interface InstallGuideModalProps {
   open: boolean;
   onClose: () => void;
   isDarkMode: boolean;
-  /** "ios" → Share → Add to Home Screen; otherwise browser-menu steps. */
-  mode: "ios" | "browser";
+  /** "ios" → Share → Add to Home Screen; "desktop" → address-bar install icon; "browser" → menu steps. */
+  mode: "ios" | "browser" | "desktop";
 }
 
 /**
@@ -49,7 +49,7 @@ export default function InstallGuideModal({ open, onClose, isDarkMode, mode }: I
                 Install Daily Impact
               </h3>
               <p className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-slate-500"}`}>
-                {mode === "ios" ? "Add to your Home Screen" : "Install from your browser"}
+                {mode === "ios" ? "Add to your Home Screen" : mode === "desktop" ? "Install the desktop app" : "Install from your browser"}
               </p>
             </div>
           </div>
@@ -91,6 +91,30 @@ export default function InstallGuideModal({ open, onClose, isDarkMode, mode }: I
                 detail="Daily Impact appears on your Home Screen and opens full-screen like an app."
               />
             </>
+          ) : mode === "desktop" ? (
+            <>
+              <Step
+                n={1}
+                isDarkMode={isDarkMode}
+                stepCard={stepCard}
+                title="Click the install icon in the address bar"
+                detail="In Chrome or Edge, look for the ⊕ install icon at the right end of the address bar (next to the star / lock icons)."
+              />
+              <Step
+                n={2}
+                isDarkMode={isDarkMode}
+                stepCard={stepCard}
+                title="Choose “Install”"
+                detail="A dialog opens — click “Install” (or “Install Daily Impact Devotional”)."
+              />
+              <Step
+                n={3}
+                isDarkMode={isDarkMode}
+                stepCard={stepCard}
+                title="Launch from your desktop"
+                detail="A shortcut is added to your desktop / taskbar and the app opens in its own window — even offline."
+              />
+            </>
           ) : (
             <>
               <Step
@@ -119,7 +143,9 @@ export default function InstallGuideModal({ open, onClose, isDarkMode, mode }: I
         </div>
 
         <p className={`mt-5 text-center text-[11px] ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
-          On Android Chrome you'll get a native install dialog — even easier.
+          {mode === "desktop"
+            ? "The site must be served over HTTPS (or localhost) for installation."
+            : "On Android Chrome you'll get a native install dialog — even easier."}
         </p>
 
         <button

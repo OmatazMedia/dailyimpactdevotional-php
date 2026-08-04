@@ -37,7 +37,7 @@ export default function Hero({ isDarkMode, heroImage }: HeroProps) {
         <img
           src={activeBannerUrl}
           alt="Daily Impact Devotional Banner"
-          className="w-full h-full object-contain object-center transition-all duration-300"
+          className="w-full h-full object-cover object-center transition-all duration-300"
           referrerPolicy="no-referrer"
         />
         {/* Subtle warm ambient overlay for dark mode readability */}

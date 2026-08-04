@@ -163,6 +163,28 @@ CREATE TABLE IF NOT EXISTS `activity_log` (
     INDEX `idx_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- First-party website analytics (populated by analytics.php from the public
+-- site's visit tracker — one row per visitor session).
+CREATE TABLE IF NOT EXISTS `analytics_visits` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `session_id` VARCHAR(64) NOT NULL,
+    `page` VARCHAR(255) DEFAULT '',
+    `referrer` VARCHAR(500) DEFAULT '',
+    `locale` VARCHAR(50) DEFAULT '',
+    `country` VARCHAR(100) DEFAULT '',
+    `region` VARCHAR(100) DEFAULT '',
+    `city` VARCHAR(100) DEFAULT '',
+    `device` VARCHAR(20) DEFAULT 'desktop',
+    `user_agent` VARCHAR(500) DEFAULT '',
+    `is_new` TINYINT(1) DEFAULT 1,
+    `visited_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `last_active_at` TIMESTAMP NULL,
+    `duration_seconds` INT DEFAULT 0,
+    INDEX `idx_session` (`session_id`),
+    INDEX `idx_visited` (`visited_at`),
+    INDEX `idx_page` (`page`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Real visitor reaction votes (one vote per devotional + emoji + IP). Counts
 -- are derived by GROUP BY — no fake seeded numbers anywhere.
 CREATE TABLE IF NOT EXISTS `devotional_reaction_votes` (

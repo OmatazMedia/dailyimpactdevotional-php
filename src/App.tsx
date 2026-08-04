@@ -21,6 +21,7 @@ import { getDevotionalsAsync, saveDevotionalAsync, updateDevotionalAsync, saveMu
 import { Devotional, ForewordPost } from "./types";
 import { API_BASE } from "./config/api";
 import { buildHeaderMap, HeaderMappingRow } from "./lib/headers";
+import { initAnalytics } from "./lib/analytics";
 
 // Helper to parse date Str and year to local Date object
 export const getDevotionalDateValue = (dateStr: string, year: number): Date => {
@@ -166,6 +167,10 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
 
   useEffect(() => {
+    // Record a public website visit (skipped inside the admin dashboard area).
+    initAnalytics(
+      location.pathname.startsWith("/dashboard") || location.pathname.startsWith("/admin")
+    );
     fetch(`${API_BASE}/admin.php?action=check`)
       .then(r => r.json())
       .then(data => {
@@ -345,6 +350,51 @@ export default function App() {
       document.documentElement.classList.remove("dark");
     }
   }, [isDarkMode]);
+
+  // Keep the browser tab + in-page social previews in sync with the open
+  // devotional. Server-side crawlers (WhatsApp, Telegram, Facebook, Twitter)
+  // get full OG tags from backend/api/og.php via the .htaccess rewrite; this
+  // effect covers the SPA itself and any JS-based embed/in-app browsers.
+  useEffect(() => {
+    const setMeta = (prop: string, content: string) => {
+      let el = document.head.querySelector(`meta[property="${prop}"]`) as HTMLMetaElement | null;
+      if (!el) {
+        el = document.createElement("meta");
+        el.setAttribute("property", prop);
+        document.head.appendChild(el);
+      }
+      el.setAttribute("content", content);
+    };
+    const setName = (name: string, content: string) => {
+      let el = document.head.querySelector(`meta[name="${name}"]`) as HTMLMetaElement | null;
+      if (!el) {
+        el = document.createElement("meta");
+        el.setAttribute("name", name);
+        document.head.appendChild(el);
+      }
+      el.setAttribute("content", content);
+    };
+
+    if (selectedDevotional) {
+      const t = selectedDevotional.title;
+      const desc = `${selectedDevotional.date}, ${selectedDevotional.year} — Read today's word on Daily Impact Devotional.`;
+      document.title = `${t} — Daily Impact Devotional`;
+      setMeta("og:title", t);
+      setMeta("og:description", desc);
+      setMeta("og:url", `${window.location.origin}?devotional=${selectedDevotional.id}`);
+      setName("twitter:title", t);
+      setName("twitter:description", desc);
+      if (selectedDevotional.imageUrl) {
+        const img = selectedDevotional.imageUrl.startsWith("http")
+          ? selectedDevotional.imageUrl
+          : `${window.location.origin}${selectedDevotional.imageUrl}`;
+        setMeta("og:image", img);
+        setName("twitter:image", img);
+      }
+    } else {
+      document.title = "Daily Impact Devotional | Dr. Andy Osakwe";
+    }
+  }, [selectedDevotional]);
 
   const handleToggleTheme = () => {
     setIsDarkMode(prev => !prev);
