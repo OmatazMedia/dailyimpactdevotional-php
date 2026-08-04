@@ -478,7 +478,7 @@ app.post("/api/admin", (req: Request, res: Response) => {
     if (!matchesEmail) {
       recordLoginFailure();
       loginFailures.set(ip, attempts + 1);
-      const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1) - 1);
+      const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
       res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
       return;
     }
@@ -489,6 +489,8 @@ app.post("/api/admin", (req: Request, res: Response) => {
     if (body.password !== admin.password) {
       recordLoginFailure();
       loginFailures.set(ip, attempts + 1);
+      // Mirror the PHP backend: this failure counts toward the threshold, so
+      // 3 attempts → 2 countdown warnings → banned on the 3rd.
       const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
       if (remaining <= 0) {
         res.status(403).json({ success: false, error: "You have been banned for too many failed login attempts. Please contact the administrator.", banned: true, attemptsRemaining: 0 });

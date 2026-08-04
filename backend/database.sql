@@ -240,6 +240,6 @@ INSERT IGNORE INTO `settings` (`setting_key`, `setting_value`) VALUES
 ('security_subnet_v6', '64'),
 ('security_notify_emails', '');
 
--- Insert default admin (password: admin123 - CHANGE AFTER INSTALL!)
-INSERT IGNORE INTO `admin_users` (`email`, `password_hash`, `name`, `role`) VALUES
-('admin@ministries.org', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Admin', 'admin');
+-- No default admin is seeded — install.php creates the real admin account
+-- (with the name/email/password entered during installation) and removes any
+-- placeholder row, so a known-credential test account can never exist.

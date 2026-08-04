@@ -212,9 +212,13 @@ switch ($method) {
 
             $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
 
-            if ($recentFailures >= $lockoutThreshold || $emailFailures >= $lockoutThreshold) {
+            // Count THIS failure toward the threshold: recentFailures is queried
+            // before the failure is logged, so add 1. This makes the password
+            // step match the email step exactly — two countdown warnings, then
+            // the third failed attempt triggers the permanent ban.
+            if (($recentFailures + 1) >= $lockoutThreshold || ($emailFailures + 1) >= $lockoutThreshold) {
                 // Ban the entire IP subnet
-                $ban = recordIpBan($ip, "Automatic ban after {$lockoutThreshold} failed login attempts", $email, $recentFailures, 'admin-login');
+                $ban = recordIpBan($ip, "Automatic ban after {$lockoutThreshold} failed login attempts", $email, $recentFailures + 1, 'admin-login');
                 
                 // Notify admins about the ban
                 $notifyEmails = getSetting('security_notify_emails', '');
@@ -256,11 +260,17 @@ switch ($method) {
             if (!$admin) {
                 $legacyHash = getSetting('admin_password_hash', '');
                 if ($legacyHash && password_verify($password, $legacyHash)) {
-                    // Create admin user on the fly
+                    // Create admin user on the fly — derive a real display name
+                    // from the email local part instead of a hardcoded 'Admin'
+                    // (which made the logged-in owner look like the seeded test
+                    // account in User Management).
+                    $local = strtolower(trim(explode('@', $email)[0] ?? ''));
+                    $local = preg_replace('/[^a-z0-9]+/', ' ', $local);
+                    $displayName = $local !== '' ? ucwords(trim($local)) : 'Administrator';
                     $stmt = $pdo->prepare(
-                        "INSERT IGNORE INTO admin_users (email, password_hash, name, role) VALUES (?, ?, 'Admin', 'admin')"
+                        "INSERT IGNORE INTO admin_users (email, password_hash, name, role) VALUES (?, ?, ?, 'admin')"
                     );
-                    $stmt->execute([$email, $legacyHash]);
+                    $stmt->execute([$email, $legacyHash, $displayName]);
                     $stmt = $pdo->prepare("SELECT * FROM admin_users WHERE email = ?");
                     $stmt->execute([$email]);
                     $admin = $stmt->fetch();
@@ -521,6 +531,7 @@ switch ($method) {
             );
             $rows = $stmt->fetchAll();
             $users = [];
+            $seenEmails = [];
             foreach ($rows as $r) {
                 $users[] = [
                     'id'        => (string)$r['id'],
@@ -530,6 +541,22 @@ switch ($method) {
                     'status'    => (string)($r['status'] ?? 'Active'),
                     'createdAt' => (string)($r['created_at'] ?? ''),
                 ];
+                $seenEmails[] = strtolower(trim((string)$r['email']));
+            }
+
+            // Guarantee the logged-in admin always sees themselves in the list,
+            // even if their row is missing from the DB (e.g. a legacy account
+            // that self-healed into admin_users on first login).
+            $sessionEmail = strtolower(trim((string)($_SESSION['admin_email'] ?? '')));
+            if ($sessionEmail !== '' && !in_array($sessionEmail, $seenEmails, true)) {
+                array_unshift($users, [
+                    'id'        => (string)($_SESSION['admin_id'] ?? 'session'),
+                    'name'      => (string)($_SESSION['admin_name'] ?? 'Administrator'),
+                    'email'     => (string)$_SESSION['admin_email'],
+                    'role'      => mapUserRole((string)($_SESSION['admin_role'] ?? 'admin')),
+                    'status'    => 'Active',
+                    'createdAt' => '',
+                ]);
             }
             jsonResponse(['success' => true, 'users' => $users]);
 

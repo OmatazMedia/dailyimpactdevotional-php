@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
-  CreditCard, Globe, Webhook, Save, Eye, EyeOff, DollarSign
+  CreditCard, Globe, Webhook, Save, Eye, EyeOff, DollarSign, Landmark
 } from "lucide-react";
 import { API_BASE } from "../config/api";
 import { apiPut } from "../lib/api";
@@ -53,6 +53,13 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
   const [defaultCurrency, setDefaultCurrency] = useState("NGN");
   const [donationMessage, setDonationMessage] = useState("");
 
+  // Bank transfer details — shown to donors in the Donate modal with a
+  // copy-to-clipboard action on the account number.
+  const [bankEnabled, setBankEnabled] = useState(true);
+  const [bankName, setBankName] = useState("");
+  const [bankAccountName, setBankAccountName] = useState("");
+  const [bankAccountNumber, setBankAccountNumber] = useState("");
+
   useEffect(() => {
     fetch(`${API_BASE}/settings.php`)
       .then(r => r.ok ? r.json() : null)
@@ -76,6 +83,10 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
         });
         setDefaultCurrency(String(data.default_currency ?? "NGN"));
         setDonationMessage(String(data.donation_message ?? ""));
+        setBankEnabled(String(data.bank_transfer_enabled ?? "true") !== "false");
+        setBankName(String(data.bank_name ?? ""));
+        setBankAccountName(String(data.bank_account_name ?? ""));
+        setBankAccountNumber(String(data.bank_account_number ?? ""));
       })
       .catch(() => {});
   }, []);
@@ -114,6 +125,16 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
       donation_message: donationMessage,
     });
     onShowToast("Donation preferences saved!", "success");
+  };
+
+  const handleSaveBankDetails = async () => {
+    await saveSettings({
+      bank_transfer_enabled: String(bankEnabled),
+      bank_name: bankName,
+      bank_account_name: bankAccountName,
+      bank_account_number: bankAccountNumber,
+    });
+    onShowToast(bankEnabled ? "Bank transfer details saved!" : "Bank transfer disabled.", "success");
   };
 
   const cardBase = `rounded-2xl border p-6 space-y-4 ${
@@ -183,6 +204,49 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
             <Save className="w-3.5 h-3.5" /> Save Donation Preferences
           </button>
         </div>
+      </div>
+
+      {/* Bank Transfer Details */}
+      <div className={`${cardBase} max-w-2xl`}>
+        <div className="flex items-center justify-between">
+          <h3 className="font-serif font-black text-sm uppercase tracking-wider text-slate-800 dark:text-white flex items-center gap-2">
+            <Landmark className="w-4 h-4 text-teal-brand" /> Bank Transfer Details
+          </h3>
+          <label className="flex items-center gap-2 cursor-pointer">
+            {gatewayStatus(bankEnabled)}
+            {toggleBtn(bankEnabled, () => setBankEnabled(v => !v))}
+          </label>
+        </div>
+
+        <p className="text-xs text-slate-500 leading-relaxed">
+          These details appear in the <strong>Donate modal</strong> so donors who prefer a direct bank transfer
+          can see them and <strong>copy the account number</strong> to their banking app.
+        </p>
+
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Bank Name</label>
+              <input type="text" placeholder="e.g. Zenith Bank" value={bankName}
+                onChange={e => setBankName(e.target.value)} className={inputBase} />
+            </div>
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Number</label>
+              <input type="text" placeholder="e.g. 0123456789" value={bankAccountNumber}
+                onChange={e => setBankAccountNumber(e.target.value)} className={inputBase} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Name</label>
+            <input type="text" placeholder="e.g. Daily Impact Devotional Ministries" value={bankAccountName}
+              onChange={e => setBankAccountName(e.target.value)} className={inputBase} />
+          </div>
+        </div>
+
+        <button onClick={handleSaveBankDetails}
+          className="w-full py-2.5 rounded-xl bg-teal-brand text-white text-xs font-black uppercase tracking-wider hover:opacity-90 transition-all flex items-center justify-center gap-2">
+          <Save className="w-3.5 h-3.5" /> Save Bank Transfer Details
+        </button>
       </div>
 
       {/* Paystack */}

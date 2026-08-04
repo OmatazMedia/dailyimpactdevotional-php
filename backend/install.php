@@ -199,8 +199,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 // ── Create admin user ───────────────────────────────────
+                // Clean upsert keyed on the admin's email: remove the seeded
+                // placeholder account (admin@ministries.org) so it can never
+                // appear as the account owner, then create/update the REAL
+                // admin row with the name + email entered during install.
                 $hash = password_hash($adminPass, PASSWORD_DEFAULT);
-                $stmt = $pdo->prepare("UPDATE admin_users SET password_hash = ?, name = ?, email = ? WHERE email = 'admin@ministries.org' OR id = 1");
+                try {
+                    $pdo->prepare("DELETE FROM admin_users WHERE email = ? AND email <> ?")
+                        ->execute(['admin@ministries.org', $adminEmail]);
+                } catch (PDOException $e) { /* table may be missing on a broken re-install */ }
+                $stmt = $pdo->prepare("UPDATE admin_users SET password_hash = ?, name = ? WHERE email = ?");
                 $stmt->execute([$hash, $adminName, $adminEmail]);
                 if ($stmt->rowCount() === 0) {
                     $pdo->prepare("INSERT IGNORE INTO admin_users (email, password_hash, name, role) VALUES (?, ?, ?, 'admin')")

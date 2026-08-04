@@ -78,6 +78,22 @@ interface AdminUser {
   createdAt: string;
 }
 
+/**
+ * Ensure the logged-in admin always appears in the User Management list.
+ * If their email is missing from the DB-backed list (legacy account, query
+ * failure, etc.), prepend their session identity so they see themselves.
+ */
+function mergeSessionUser(
+  list: AdminUser[],
+  session: { email?: string; name?: string; role?: string } | null,
+): AdminUser[] {
+  if (!session?.email) return list;
+  const email = session.email.toLowerCase();
+  if (list.some((u) => u.email.toLowerCase() === email)) return list;
+  const role = (session.role || "admin").toLowerCase() === "admin" ? "Administrator" : "Assistant Editor";
+  return [{ id: "session", name: session.name || "Administrator", email: session.email, role, status: "Active", createdAt: "" }, ...list];
+}
+
 interface MappedHeader {
   dateKey: string; // e.g., "June 7"
   fileName: string;
@@ -200,6 +216,9 @@ export default function Dashboard({
 
   // Admin users are source-of-truth from the database/session, not localStorage.
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [sessionUser, setSessionUser] = useState<{ email?: string; name?: string; role?: string } | null>(null);
+  const sessionUserRef = useRef<{ email?: string; name?: string; role?: string } | null>(null);
+  useEffect(() => { sessionUserRef.current = sessionUser; }, [sessionUser]);
   useEffect(() => {
     // Keep the UI tied to the authenticated admin only.
     fetch(`${API_BASE}/admin.php?action=check`)
@@ -216,8 +235,14 @@ export default function Dashboard({
           setWelcomeMsg(`Welcome back, ${name}! 👋`);
           setWelcomeVisible(true);
           setTimeout(() => setWelcomeVisible(false), 6000);
+
+          // Safety net: the logged-in admin must ALWAYS see themselves in the
+          // User Management list, even if the DB query fails or their row is
+          // missing. Merged into the loaded list below if not already present.
+          setSessionUser(data.user);
         } else {
           setUsers([]);
+          setSessionUser(null);
         }
       })
       .catch(() => setUsers([]));
@@ -228,9 +253,8 @@ export default function Dashboard({
       fetch(`${API_BASE}/admin.php?action=list-users`)
         .then((res) => res.ok ? res.json() : null)
         .then((data: { success?: boolean; users?: AdminUser[] } | null) => {
-          if (data?.success && Array.isArray(data.users)) {
-            setUsers(data.users);
-          }
+          const list: AdminUser[] = data?.success && Array.isArray(data.users) ? data.users : [];
+          setUsers((prev) => mergeSessionUser(list, sessionUserRef.current));
         })
         .catch(() => { /* session check above already handles failure */ });
     };
