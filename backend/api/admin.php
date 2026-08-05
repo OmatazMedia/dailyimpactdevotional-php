@@ -128,12 +128,16 @@ switch ($method) {
 
                     // Same rate-limit / IP-ban logic as the password step, so a
                     // burst of unknown-email guesses also gets the IP banned.
-                    $cutoff = date('Y-m-d H:i:s', time() - 900);
+                    // Use MySQL's own clock (NOT PHP-side date() strings) for the
+                    // 15-minute window — PHP and MySQL timezones often differ on
+                    // shared hosts, which made the countdown never advance and
+                    // the ban never trigger.
                     $failStmt = $pdo->prepare(
                         "SELECT COUNT(*) FROM login_logs
-                         WHERE ip_address = ? AND success = 0 AND logged_at >= ?"
+                         WHERE ip_address = ? AND success = 0
+                           AND logged_at >= NOW() - INTERVAL 15 MINUTE"
                     );
-                    $failStmt->execute([$ip, $cutoff]);
+                    $failStmt->execute([$ip]);
                     $recentFailures = (int)$failStmt->fetchColumn();
                     $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
 
@@ -194,20 +198,25 @@ switch ($method) {
             }
 
             // Count recent failed attempts from this IP (last 15 minutes)
-            $cutoff = date('Y-m-d H:i:s', time() - 900);
+            // Use MySQL's own clock (NOT PHP-side date() strings) for the
+            // 15-minute window — PHP and MySQL timezones often differ on
+            // shared hosts, which made the countdown never advance and the
+            // ban never trigger.
             $failStmt = $pdo->prepare(
                 "SELECT COUNT(*) FROM login_logs
-                 WHERE ip_address = ? AND success = 0 AND logged_at >= ?"
+                 WHERE ip_address = ? AND success = 0
+                   AND logged_at >= NOW() - INTERVAL 15 MINUTE"
             );
-            $failStmt->execute([$ip, $cutoff]);
+            $failStmt->execute([$ip]);
             $recentFailures = (int)$failStmt->fetchColumn();
 
             // Also count failures for this specific email
             $emailFailStmt = $pdo->prepare(
                 "SELECT COUNT(*) FROM login_logs
-                 WHERE email = ? AND success = 0 AND logged_at >= ?"
+                 WHERE email = ? AND success = 0
+                   AND logged_at >= NOW() - INTERVAL 15 MINUTE"
             );
-            $emailFailStmt->execute([$email, $cutoff]);
+            $emailFailStmt->execute([$email]);
             $emailFailures = (int)$emailFailStmt->fetchColumn();
 
             $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
@@ -296,7 +305,7 @@ switch ($method) {
                 $attemptsRemaining = max(0, $lockoutThreshold - max($recentFailures, $emailFailures) - 1);
                 jsonResponse([
                     'success' => false,
-                    'message' => 'Invalid email or password. ' . ($attemptsRemaining > 0 ? "{$attemptsRemaining} attempt" . ($attemptsRemaining === 1 ? '' : 's') . " remaining before IP ban." : "Your IP will be banned on next failed attempt."),
+                    'message' => 'Invalid email or password. ' . ($attemptsRemaining > 0 ? "{$attemptsRemaining} attempt" . ($attemptsRemaining === 1 ? '' : 's') . " remaining before you are banned." : "You will be banned on your next failed attempt."),
                     'error'   => 'Invalid email or password.',
                     'attemptsRemaining' => $attemptsRemaining,
                 ], 401);
@@ -707,8 +716,18 @@ switch ($method) {
             // Re-validate session binding (timeout check runs via secureSession already called at top)
             $loggedIn = isset($_SESSION['admin_id']);
 
+            // Report whether THIS IP is currently banned so the login page can
+            // show the banned screen immediately instead of the login form.
+            $banned = false;
+            try {
+                $banned = getBanForIp(getClientIp()) !== null;
+            } catch (Throwable $e) {
+                $banned = false;
+            }
+
             jsonResponse([
                 'loggedIn' => $loggedIn,
+                'banned'   => $banned,
                 'user'     => $loggedIn ? [
                     'email' => $_SESSION['admin_email'] ?? '',
                     'name'  => $_SESSION['admin_name'] ?? '',

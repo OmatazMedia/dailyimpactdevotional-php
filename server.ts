@@ -378,6 +378,9 @@ const adminSessions = new Map<string, { email: string; name: string; lastSeen: n
 // login_logs-based logic). Cleared on successful login.
 const MOCK_LOGIN_THRESHOLD = 3;
 const loginFailures = new Map<string, number>();
+// IPs that have crossed the threshold stay banned (mirrors PHP's permanent
+// ip_bans — the mock keeps them in-memory for the dev session).
+const mockBannedIps = new Set<string>();
 
 interface AdminRecord { email: string; password: string; name: string; }
 
@@ -421,7 +424,11 @@ app.get("/api/admin", (req: Request, res: Response) => {
   const action = String(req.query.action ?? "");
   if (action === "check") {
     const user = getSessionUser(req);
-    res.json(user ? { loggedIn: true, user: { email: user.email, name: user.name } } : { loggedIn: false, user: null });
+    const ip = String(req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ?? req.socket.remoteAddress ?? "local");
+    const banned = mockBannedIps.has(ip);
+    res.json(user
+      ? { loggedIn: true, user: { email: user.email, name: user.name }, banned }
+      : { loggedIn: false, user: null, banned });
     return;
   }
   if (action === "list-users") {
@@ -464,6 +471,7 @@ app.post("/api/admin", (req: Request, res: Response) => {
         loginFailures.set(ip, attempts + 1);
         const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
         if (remaining <= 0) {
+          mockBannedIps.add(ip);
           res.status(403).json({ success: false, error: "You have been banned for too many failed login attempts. Please contact the administrator.", banned: true, attemptsRemaining: 0 });
         } else {
           res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
@@ -479,7 +487,12 @@ app.post("/api/admin", (req: Request, res: Response) => {
       recordLoginFailure();
       loginFailures.set(ip, attempts + 1);
       const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
-      res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
+      if (remaining <= 0) {
+        mockBannedIps.add(ip);
+        res.status(403).json({ success: false, error: "You have been banned for too many failed login attempts. Please contact the administrator.", banned: true, attemptsRemaining: 0 });
+      } else {
+        res.status(401).json({ success: false, error: "No account found with this email address. Please check and try again.", attemptsRemaining: remaining });
+      }
       return;
     }
     if (!body.password || body.password.length < 6) {
@@ -493,9 +506,10 @@ app.post("/api/admin", (req: Request, res: Response) => {
       // 3 attempts → 2 countdown warnings → banned on the 3rd.
       const remaining = Math.max(0, MOCK_LOGIN_THRESHOLD - (attempts + 1));
       if (remaining <= 0) {
+        mockBannedIps.add(ip);
         res.status(403).json({ success: false, error: "You have been banned for too many failed login attempts. Please contact the administrator.", banned: true, attemptsRemaining: 0 });
       } else {
-        res.status(401).json({ success: false, error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before IP ban.`, attemptsRemaining: remaining });
+        res.status(401).json({ success: false, error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before you are banned.`, attemptsRemaining: remaining });
       }
       return;
     }

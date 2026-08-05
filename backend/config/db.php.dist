@@ -500,11 +500,58 @@ function isIpInRange(string $ip, string $start, string $end): bool {
     return $l >= $s && $l <= $e;
 }
 
+/**
+ * Idempotently create the ip_bans table if it is missing.
+ *
+ * Older deployments (pre-ip_bans database.sql) have no ban table, which made
+ * getBanForIp()/recordIpBan() throw an SQL error on EVERY login attempt — the
+ * countdown never advanced and no ban was ever recorded. Self-healing here
+ * means a stale database starts enforcing bans immediately, no re-install.
+ */
+function ensureBanTable(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS ip_bans (
+                id VARCHAR(36) PRIMARY KEY,
+                ip_address VARCHAR(45) NOT NULL,
+                ip_version TINYINT(1) NOT NULL DEFAULT 4,
+                cidr VARCHAR(80) NOT NULL,
+                ban_start VARCHAR(80) NOT NULL,
+                ban_end VARCHAR(80) NOT NULL,
+                reason VARCHAR(255) NOT NULL,
+                source VARCHAR(50) DEFAULT 'admin-login',
+                email VARCHAR(255) DEFAULT '',
+                failed_attempts INT DEFAULT 0,
+                active TINYINT(1) DEFAULT 1,
+                unbanned_at TIMESTAMP NULL,
+                unbanned_by VARCHAR(255) DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_cidr_active (cidr, active),
+                INDEX idx_active (active),
+                INDEX idx_ip_address (ip_address)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    } catch (Throwable $e) {
+        // Never break the request over a missing table — the login flow
+        // reports the failure cleanly below.
+    }
+}
+
 function getBanForIp(string $ip): ?array {
     global $pdo;
     if (!$pdo) {
         return null;
     }
+    ensureBanTable();
     $version = ipVersion($ip);
     $stmt = $pdo->prepare(
         "SELECT * FROM ip_bans

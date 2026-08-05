@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Mail,
@@ -12,6 +13,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
+import { API_BASE } from "../config/api";
 
 interface LoginProps {
   isDarkMode: boolean;
@@ -19,6 +21,7 @@ interface LoginProps {
 }
 
 export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -51,6 +54,41 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
   // When a failed attempt carries the server's countdown, remember that a
   // warning is owed so the amber "X attempts left" banner shows right away.
   const [showAttemptWarning, setShowAttemptWarning] = useState(false);
+
+  // Banned IP flow: the login page checks the ban status on mount; a banned
+  // visitor sees the banned screen + a 10-second countdown, then is sent back
+  // to the homepage (never shown the login form again).
+  const [banCountdown, setBanCountdown] = useState(10);
+
+  useEffect(() => {
+    // If this IP is banned, never show the login form — show the banned
+    // screen and return to the homepage after the countdown.
+    fetch(`${API_BASE}/admin.php?action=check`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { banned?: boolean; message?: string } | null) => {
+        if (data?.banned) {
+          setBannedMessage("You have been banned from accessing the admin area. Please contact the administrator.");
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 10-second countdown → homepage. Runs only while the banned screen is shown.
+  useEffect(() => {
+    if (!bannedMessage) return;
+    setBanCountdown(10);
+    const t = setInterval(() => {
+      setBanCountdown((c) => {
+        if (c <= 1) {
+          clearInterval(t);
+          navigate("/");
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [bannedMessage, navigate]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,8 +128,12 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
         setIsLoading(false);
       } catch (e) {
         if (e instanceof ApiError && e.status === 403) {
-          // IP has been banned — show the dedicated banned screen.
-          setBannedMessage(e.message || "Your IP address has been banned. Contact an administrator.");
+          // IP has been banned mid-attempt — go straight back to the homepage.
+          // (A direct visit to the login page later shows the banned screen
+          // with the countdown instead, via the mount-time ban check.)
+          setBannedMessage(e.message || "You have been banned. Please contact the administrator.");
+          navigate("/");
+          return;
         } else {
           const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
           setErrorMessage(msg);
@@ -135,7 +177,10 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
         }
       } catch (e) {
         if (e instanceof ApiError && e.status === 403) {
-          setBannedMessage(e.message || "Your IP address has been banned. Contact an administrator.");
+          // IP has been banned mid-attempt — go straight back to the homepage.
+          setBannedMessage(e.message || "You have been banned. Please contact the administrator.");
+          navigate("/");
+          return;
         } else {
           const msg = e instanceof ApiError ? e.message : (e instanceof Error ? `Could not reach server: ${e.message}` : "Network error");
           setErrorMessage(msg);
@@ -308,10 +353,10 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
             <span>
               {attemptsRemaining === 0
-                ? "⚠️ Final warning — your IP will be banned after this next failed attempt. Contact the administrator if this is a mistake."
+                ? "⚠️ Final warning — you will be banned after this next failed attempt. Contact the administrator if this is a mistake."
                 : attemptsRemaining === 1
-                  ? "⚠️ 1 attempt left — your IP will be banned after that."
-                  : `⚠️ ${attemptsRemaining} attempts left — your IP will be banned afterwards.`}
+                  ? "⚠️ 1 attempt left — you will be banned after that."
+                  : `⚠️ ${attemptsRemaining} attempts left — you will be banned afterwards.`}
             </span>
           </motion.div>
         )}
@@ -330,12 +375,16 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
             <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400 max-w-[240px] mx-auto">
               {bannedMessage}
             </p>
+            <div className="text-xs font-bold text-slate-500 dark:text-slate-400 flex items-center justify-center gap-1.5">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              Returning to the homepage in {banCountdown}s…
+            </div>
             <button
               type="button"
-              onClick={() => { setBannedMessage(""); setLoginStep("email"); setErrorMessage(""); setShowAttemptWarning(false); setAttemptsRemaining(3); }}
+              onClick={() => navigate("/")}
               className="w-full py-2 text-xs font-bold text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
             >
-              Back to sign in
+              Go to homepage now
             </button>
           </div>
         ) : resetToken ? (
