@@ -604,7 +604,16 @@ function detectRealMime(string $filePath, string $fallbackMime = 'application/oc
  * Call BEFORE session_start().
  */
 function configureSession(): void {
-    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    // Detect HTTPS robustly: direct TLS, reverse proxies (X-Forwarded-Proto)
+    // and Cloudflare (CF-Visitor). Marking the cookie Secure when the browser
+    // is actually on HTTP silently drops it and kills the session — the exact
+    // "login first" loop admins hit behind Cloudflare Flexible SSL on cPanel.
+    $secure = false;
+    $https = (string)($_SERVER['HTTPS'] ?? '');
+    if ($https !== '' && $https !== 'off') $secure = true;
+    if ((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') $secure = true;
+    if (str_contains((string)($_SERVER['HTTP_CF_VISITOR'] ?? ''), '"https"')) $secure = true;
+
     $cookieParams = session_get_cookie_params();
     session_set_cookie_params([
         'lifetime' => 0, // until browser closes
@@ -612,7 +621,7 @@ function configureSession(): void {
         'domain'   => $cookieParams['domain'] ?? '',
         'secure'   => $secure,
         'httponly' => true,
-        'samesite' => 'Strict',
+        'samesite' => 'Lax', // Strict can break the cookie when a page opens via a redirect chain
     ]);
 
     // Use a project-relative session save path so sessions persist on cPanel
@@ -666,13 +675,17 @@ function regenerateSession(): void {
  * that destroyed sessions and made admin-only data (like decrypted Telegram
  * credentials in settings.php) "disappear" after reload/logout.
  */
+function sessionFingerprint(): string {
+    $ip = getClientIp();
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    return hash('sha256', normalizeSubnet($ip) . '|' . $ua);
+}
+
 function validateSessionBinding(): bool {
     if (session_status() !== PHP_SESSION_ACTIVE) {
         return false;
     }
-    $ip      = getClientIp();
-    $ua      = $_SERVER['HTTP_USER_AGENT'] ?? '';
-    $fingerprint = hash('sha256', normalizeSubnet($ip) . '|' . $ua);
+    $fingerprint = sessionFingerprint();
 
     if (!isset($_SESSION['session_fingerprint'])) {
         // First check — set fingerprint

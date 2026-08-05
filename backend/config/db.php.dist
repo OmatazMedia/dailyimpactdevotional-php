@@ -476,6 +476,30 @@ function normalizeSubnet(string $ip): string {
     return subnetForIp($ip);
 }
 
+/**
+ * Numeric IP range check (IPv4 or IPv6).
+ *
+ * ban_start/ban_end are stored as VARCHAR strings (e.g. "105.112.50.0" /
+ * "105.112.50.255"). Comparing them with string operators in SQL is WRONG:
+ * "105.112.50.37" > "105.112.50.255" lexically ('3' > '2'), so a /24 ban
+ * silently never matched most IPs — the auto-IP-ban appeared to do nothing.
+ * We therefore fetch candidate bans and compare the packed binary form here.
+ */
+function isIpInRange(string $ip, string $start, string $end): bool {
+    if (str_contains($ip, ':') || str_contains($start, ':')) {
+        $bin = @inet_pton($ip);
+        $s   = @inet_pton($start);
+        $e   = @inet_pton($end);
+        if ($bin === false || $s === false || $e === false) return false;
+        return strcmp($bin, $s) >= 0 && strcmp($bin, $e) <= 0;
+    }
+    $l = ip2long($ip);
+    $s = ip2long($start);
+    $e = ip2long($end);
+    if ($l === false || $s === false || $e === false) return false;
+    return $l >= $s && $l <= $e;
+}
+
 function getBanForIp(string $ip): ?array {
     global $pdo;
     if (!$pdo) {
@@ -486,14 +510,17 @@ function getBanForIp(string $ip): ?array {
         "SELECT * FROM ip_bans
          WHERE active = 1
          AND ip_version = ?
-         AND ban_start <= ?
-         AND ban_end >= ?
-         ORDER BY created_at DESC
-         LIMIT 1"
+         ORDER BY created_at DESC"
     );
-    $stmt->execute([$version, $ip, $ip]);
-    $ban = $stmt->fetch();
-    return $ban ?: null;
+    $stmt->execute([$version]);
+    // Numeric range comparison in PHP (see isIpInRange) — SQL string
+    // comparison on ban_start/ban_end is unreliable for IPs.
+    while ($ban = $stmt->fetch()) {
+        if (isIpInRange($ip, (string)($ban['ban_start'] ?? ''), (string)($ban['ban_end'] ?? ''))) {
+            return $ban;
+        }
+    }
+    return null;
 }
 
 function queueMail(string $to, string $subject, string $body): void {
@@ -577,7 +604,16 @@ function detectRealMime(string $filePath, string $fallbackMime = 'application/oc
  * Call BEFORE session_start().
  */
 function configureSession(): void {
-    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    // Detect HTTPS robustly: direct TLS, reverse proxies (X-Forwarded-Proto)
+    // and Cloudflare (CF-Visitor). Marking the cookie Secure when the browser
+    // is actually on HTTP silently drops it and kills the session — the exact
+    // "login first" loop admins hit behind Cloudflare Flexible SSL on cPanel.
+    $secure = false;
+    $https = (string)($_SERVER['HTTPS'] ?? '');
+    if ($https !== '' && $https !== 'off') $secure = true;
+    if ((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') $secure = true;
+    if (str_contains((string)($_SERVER['HTTP_CF_VISITOR'] ?? ''), '"https"')) $secure = true;
+
     $cookieParams = session_get_cookie_params();
     session_set_cookie_params([
         'lifetime' => 0, // until browser closes
@@ -585,7 +621,7 @@ function configureSession(): void {
         'domain'   => $cookieParams['domain'] ?? '',
         'secure'   => $secure,
         'httponly' => true,
-        'samesite' => 'Strict',
+        'samesite' => 'Lax', // Strict can break the cookie when a page opens via a redirect chain
     ]);
 
     // Use a project-relative session save path so sessions persist on cPanel
@@ -633,13 +669,17 @@ function regenerateSession(): void {
  * Bind session to client IP and User-Agent.
  * Returns true if the session fingerprint matches.
  */
+function sessionFingerprint(): string {
+    $ip = getClientIp();
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    return hash('sha256', normalizeSubnet($ip) . '|' . $ua);
+}
+
 function validateSessionBinding(): bool {
     if (session_status() !== PHP_SESSION_ACTIVE) {
         return false;
     }
-    $ip      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $ua      = $_SERVER['HTTP_USER_AGENT'] ?? '';
-    $fingerprint = hash('sha256', $ip . '|' . $ua);
+    $fingerprint = sessionFingerprint();
 
     if (!isset($_SESSION['session_fingerprint'])) {
         // First check — set fingerprint

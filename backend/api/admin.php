@@ -321,8 +321,11 @@ switch ($method) {
             $lockKey = 'login_lock_' . preg_replace('/[^a-f0-9]/', '', hash('sha256', $ip));
             setSetting($lockKey, '0');
 
-            // Bind session to this IP and User-Agent
-            $fingerprint = hash('sha256', $ip . '|' . $ua);
+            // Bind session to this client. MUST use the exact same fingerprint
+            // that validateSessionBinding() computes (IP subnet + UA) — a
+            // mismatch here silently destroys the session on the next request,
+            // logging the admin out of every operation ("login first" errors).
+            $fingerprint = sessionFingerprint();
 
             // Set session data
             $_SESSION['admin_id']            = $admin['id'];
@@ -670,6 +673,7 @@ switch ($method) {
             );
             $rows = $stmt->fetchAll();
             $users = [];
+            $seenEmails = [];
             foreach ($rows as $r) {
                 $users[] = [
                     'id'        => (string)$r['id'],
@@ -679,6 +683,22 @@ switch ($method) {
                     'status'    => (string)($r['status'] ?? 'Active'),
                     'createdAt' => (string)($r['created_at'] ?? ''),
                 ];
+                $seenEmails[] = strtolower(trim((string)$r['email']));
+            }
+
+            // Guarantee the logged-in admin always sees themselves in the list,
+            // even if their row is missing from the DB (e.g. a legacy account
+            // that self-healed into admin_users on first login).
+            $sessionEmail = strtolower(trim((string)($_SESSION['admin_email'] ?? '')));
+            if ($sessionEmail !== '' && !in_array($sessionEmail, $seenEmails, true)) {
+                array_unshift($users, [
+                    'id'        => (string)($_SESSION['admin_id'] ?? 'session'),
+                    'name'      => (string)($_SESSION['admin_name'] ?? 'Administrator'),
+                    'email'     => (string)$_SESSION['admin_email'],
+                    'role'      => mapUserRole((string)($_SESSION['admin_role'] ?? 'admin')),
+                    'status'    => 'Active',
+                    'createdAt' => '',
+                ]);
             }
             jsonResponse(['success' => true, 'users' => $users]);
 
