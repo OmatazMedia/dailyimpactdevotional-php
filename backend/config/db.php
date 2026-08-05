@@ -786,6 +786,33 @@ function secureSession(int $maxIdleSeconds = 3600): bool {
     return true;
 }
 
+// ─── Donation columns (idempotent migration) ─────────────────────────────────
+// Older databases predate the donor phone number and anonymous-flag columns.
+// Instead of forcing a re-install, add them on demand — donations.php calls
+// this on every request so stale DBs self-heal on the first donation.
+function ensureDonationColumns(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM donations")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('phone', $cols, true)) {
+            $pdo->exec("ALTER TABLE donations ADD COLUMN phone VARCHAR(40) DEFAULT '' AFTER name");
+        }
+        if (!in_array('is_anonymous', $cols, true)) {
+            $pdo->exec("ALTER TABLE donations ADD COLUMN is_anonymous TINYINT(1) NOT NULL DEFAULT 0 AFTER phone");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
 // ─── Real-Time Activity Log & Reactions (idempotent table creation) ─────────
 function ensureActivityTables(): void {
     global $pdo;

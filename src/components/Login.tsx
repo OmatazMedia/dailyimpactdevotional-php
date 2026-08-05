@@ -116,7 +116,12 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
         });
 
         if (json.success && json.step === "password") {
-          setAttemptsRemaining(json.attemptsRemaining || 3);
+          // The email is registered — the ban countdown warning is no longer
+          // owed, so clear it. (If they keep submitting wrong emails the
+          // server keeps returning the remaining attempts and the warning
+          // returns — the countdown only stops when a known email is entered.)
+          setShowAttemptWarning(false);
+          setAttemptsRemaining(3);
           setLoginStep("password");
           // The server only advances to the password step when the email is
           // registered, so we can truthfully tell the user it was recognised.
@@ -167,6 +172,9 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
         });
 
         if (json.success && json.user) {
+          // Full login succeeded — drop any lingering ban warning state.
+          setShowAttemptWarning(false);
+          setAttemptsRemaining(3);
           setSuccessMessage(`Welcome, ${json.user.name || json.user.email}!`);
           setTimeout(() => {
             if (onLoginSuccess) onLoginSuccess(json.user!.email);
@@ -485,6 +493,10 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
                     setLoginStep("email");
                     setPassword("");
                     setErrorMessage("");
+                    // Going back to edit the email also clears the countdown
+                    // banner — it reappears on the next failed attempt.
+                    setShowAttemptWarning(false);
+                    setAttemptsRemaining(3);
                   }}
                   className="text-[11px] text-slate-400 hover:text-teal-brand font-semibold flex items-center gap-1 mb-2 transition-colors"
                 >

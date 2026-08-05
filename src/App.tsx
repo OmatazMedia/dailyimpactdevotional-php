@@ -11,6 +11,7 @@ import AddDevotional from "./components/AddDevotional";
 import ListDevotional from "./components/ListDevotional";
 import Login from "./components/Login";
 import DonateModal from "./components/DonateModal";
+import DonationThanks from "./components/DonationThanks";
 import Footer from "./components/Footer";
 import Dashboard from "./components/Dashboard";
 import ForewordView from "./components/ForewordView";
@@ -239,6 +240,9 @@ export default function App() {
   // Custom hero banner URL (from settings) preloaded with the other data.
   const [homepageHeroImage, setHomepageHeroImage] = useState("");
   const [isDonateOpen, setIsDonateOpen] = useState<boolean>(false);
+  // After a successful online donation, the public page is replaced by the
+  // confetti thank-you screen (like a redirect to a celebration page).
+  const [thanksInfo, setThanksInfo] = useState<{ name: string; amount: number; currency: string; anonymous: boolean } | null>(null);
   const [activeDateKey, setActiveDateKey] = useState<string>("");
 
   // Sort and set devotionals chronologically
@@ -549,6 +553,20 @@ export default function App() {
   const currentMonth = todayParts.month;
   const currentYear = todayParts.year;
 
+  // Successful online donation → show the full-screen thank-you page.
+  if (thanksInfo) {
+    return (
+      <DonationThanks
+        name={thanksInfo.name}
+        amount={thanksInfo.amount}
+        currency={thanksInfo.currency}
+        isDarkMode={isDarkMode}
+        onClose={() => setThanksInfo(null)}
+        onHome={() => { setThanksInfo(null); navigate("/"); }}
+      />
+    );
+  }
+
   if (activeTab === "dashboard") {
     if (!currentUser) return null;
     return (
@@ -747,6 +765,11 @@ export default function App() {
         isOpen={isDonateOpen}
         onClose={() => setIsDonateOpen(false)}
         isDarkMode={isDarkMode}
+        onDonationComplete={(info) => {
+          // Close the modal and replace the page with the celebration screen.
+          setIsDonateOpen(false);
+          setThanksInfo(info);
+        }}
       />
 
       {/* 6. PWA — installed-app splash (standalone only) + subtle install banner */}

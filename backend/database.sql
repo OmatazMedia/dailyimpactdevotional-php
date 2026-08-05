@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS `donations` (
     `currency` VARCHAR(10) DEFAULT 'NGN',
     `email` VARCHAR(255),
     `name` VARCHAR(255),
+    `phone` VARCHAR(40) DEFAULT '' COMMENT 'Donor phone (blank for anonymous)',
+    `is_anonymous` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = anonymous donor (no personal details)',
     `provider` VARCHAR(50) DEFAULT 'paystack',
     `status` ENUM('success', 'pending', 'failed') DEFAULT 'pending',
     `donated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -228,10 +230,15 @@ INSERT IGNORE INTO `settings` (`setting_key`, `setting_value`) VALUES
 ('webhook_secret', ''),
 ('default_currency', 'NGN'),
 ('donation_message', 'Thank you for supporting Daily Impact Devotional.'),
+-- Which payment gateway processes each currency in the Donate modal (JSON)
+('gateway_currency_map', '{"NGN":"paystack","USD":"flutterwave","GBP":"flutterwave"}'),
 ('bank_transfer_enabled', 'true'),
 ('bank_account_name', 'Daily Impact Devotional Ministries'),
 ('bank_account_number', ''),
 ('bank_name', ''),
+-- Multiple bank accounts, one JSON entry per account (currency + international details)
+('bank_accounts', '[]'),
+('bank_currency', 'NGN'),
 ('security_lockout_threshold', '3'),
 -- Bans are PERMANENT until an administrator unbans the IP from the dashboard.
 -- (security_ban_minutes is kept for backward compatibility but no longer expires bans.)

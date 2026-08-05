@@ -1,9 +1,14 @@
 import React, { useState, useEffect } from "react";
 import {
-  CreditCard, Globe, Webhook, Save, Eye, EyeOff, DollarSign, Landmark
+  CreditCard, Globe, Webhook, Save, Eye, EyeOff, DollarSign, Landmark,
+  Plus, Trash2, ChevronDown, ChevronUp
 } from "lucide-react";
 import { API_BASE } from "../config/api";
 import { apiPut } from "../lib/api";
+import {
+  BankAccount, BANK_CURRENCIES, emptyBankAccount,
+  parseBankAccounts, serializeBankAccounts
+} from "../lib/bankAccounts";
 
 interface DonationSettingsProps {
   isDarkMode: boolean;
@@ -53,12 +58,17 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
   const [defaultCurrency, setDefaultCurrency] = useState("NGN");
   const [donationMessage, setDonationMessage] = useState("");
 
-  // Bank transfer details — shown to donors in the Donate modal with a
-  // copy-to-clipboard action on the account number.
+  // Which gateway processes each currency in the Donate modal (Pay Online).
+  const [gatewayMap, setGatewayMap] = useState<Record<string, string>>({
+    NGN: "paystack", USD: "flutterwave", GBP: "flutterwave",
+  });
+
+  // Bank transfer accounts — one or more, each with its own currency and
+  // optional international details. Shown to donors in the Donate modal with
+  // copy-to-clipboard on every copyable field.
   const [bankEnabled, setBankEnabled] = useState(true);
-  const [bankName, setBankName] = useState("");
-  const [bankAccountName, setBankAccountName] = useState("");
-  const [bankAccountNumber, setBankAccountNumber] = useState("");
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`${API_BASE}/settings.php`)
@@ -83,10 +93,16 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
         });
         setDefaultCurrency(String(data.default_currency ?? "NGN"));
         setDonationMessage(String(data.donation_message ?? ""));
+        try {
+          const parsed = JSON.parse(String(data.gateway_currency_map ?? ""));
+          if (parsed && typeof parsed === "object") {
+            setGatewayMap(prev => ({ ...prev, ...(parsed as Record<string, string>) }));
+          }
+        } catch { /* keep defaults */ }
         setBankEnabled(String(data.bank_transfer_enabled ?? "true") !== "false");
-        setBankName(String(data.bank_name ?? ""));
-        setBankAccountName(String(data.bank_account_name ?? ""));
-        setBankAccountNumber(String(data.bank_account_number ?? ""));
+        const accounts = parseBankAccounts(data);
+        setBankAccounts(accounts);
+        if (accounts.length > 0) setExpandedAccount(accounts[0].id);
       })
       .catch(() => {});
   }, []);
@@ -127,14 +143,43 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
     onShowToast("Donation preferences saved!", "success");
   };
 
+  const handleSaveGatewayMap = async () => {
+    await saveSettings({
+      gateway_currency_map: JSON.stringify(gatewayMap),
+    });
+    onShowToast("Payment gateway mapping saved!", "success");
+  };
+
+  const updateAccount = (id: string, patch: Partial<BankAccount>) => {
+    setBankAccounts(list => list.map(a => (a.id === id ? { ...a, ...patch } : a)));
+  };
+
+  const addAccount = () => {
+    const next = emptyBankAccount();
+    setBankAccounts(list => [...list, next]);
+    setExpandedAccount(next.id);
+  };
+
+  const removeAccount = (id: string) => {
+    setBankAccounts(list => list.filter(a => a.id !== id));
+    setExpandedAccount(prev => (prev === id ? null : prev));
+  };
+
   const handleSaveBankDetails = async () => {
+    // Drop obviously empty placeholder rows before saving.
+    const clean = bankAccounts.filter(
+      a => a.accountNumber.trim() !== "" || a.bankName.trim() !== ""
+    );
     await saveSettings({
       bank_transfer_enabled: String(bankEnabled),
-      bank_name: bankName,
-      bank_account_name: bankAccountName,
-      bank_account_number: bankAccountNumber,
+      bank_accounts: serializeBankAccounts(clean),
     });
-    onShowToast(bankEnabled ? "Bank transfer details saved!" : "Bank transfer disabled.", "success");
+    onShowToast(
+      bankEnabled
+        ? `Bank transfer details saved (${clean.length} account${clean.length === 1 ? "" : "s"}).`
+        : "Bank transfer disabled.",
+      "success"
+    );
   };
 
   const cardBase = `rounded-2xl border p-6 space-y-4 ${
@@ -206,6 +251,40 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
         </div>
       </div>
 
+      {/* Payment Gateway per Currency */}
+      <div className={`${cardBase} max-w-2xl`}>
+        <h3 className="font-serif font-black text-sm uppercase tracking-wider text-slate-800 dark:text-white flex items-center gap-2">
+          <CreditCard className="w-4 h-4 text-teal-brand" /> Payment Gateway per Currency
+        </h3>
+
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Choose which gateway processes each currency when donors <strong>Pay Online</strong> in the Donate modal.
+          The selected gateway must be enabled above for it to be offered.
+        </p>
+
+        <div className="space-y-3">
+          {["NGN", "USD", "GBP"].map(cur => (
+            <div key={cur} className="flex items-center justify-between gap-3">
+              <span className="text-xs font-black w-16 text-slate-500 dark:text-slate-400">{cur}</span>
+              <select
+                value={gatewayMap[cur] || "none"}
+                onChange={e => setGatewayMap(m => ({ ...m, [cur]: e.target.value }))}
+                className={inputBase}
+              >
+                <option value="none">No gateway — use Bank Transfer only</option>
+                <option value="paystack">Paystack</option>
+                <option value="flutterwave">Flutterwave</option>
+              </select>
+            </div>
+          ))}
+        </div>
+
+        <button onClick={handleSaveGatewayMap}
+          className="w-full py-2.5 rounded-xl bg-teal-brand text-white text-xs font-black uppercase tracking-wider hover:opacity-90 transition-all flex items-center justify-center gap-2">
+          <Save className="w-3.5 h-3.5" /> Save Gateway Mapping
+        </button>
+      </div>
+
       {/* Bank Transfer Details */}
       <div className={`${cardBase} max-w-2xl`}>
         <div className="flex items-center justify-between">
@@ -219,28 +298,111 @@ export default function DonationSettings({ isDarkMode, onShowToast }: DonationSe
         </div>
 
         <p className="text-xs text-slate-500 leading-relaxed">
-          These details appear in the <strong>Donate modal</strong> so donors who prefer a direct bank transfer
-          can see them and <strong>copy the account number</strong> to their banking app.
+          Add one or more bank accounts — each with its own <strong>currency</strong>. Donors see the
+          accounts that match the currency they're giving in, plus any international details
+          (SWIFT, IBAN, routing) for overseas transfers.
         </p>
 
         <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Bank Name</label>
-              <input type="text" placeholder="e.g. Zenith Bank" value={bankName}
-                onChange={e => setBankName(e.target.value)} className={inputBase} />
+          {bankAccounts.length === 0 && (
+            <div className={`rounded-xl border border-dashed p-6 text-center text-xs text-slate-400 ${isDarkMode ? "border-slate-700" : "border-slate-300"}`}>
+              No bank accounts yet — add your first one to start receiving bank transfers.
             </div>
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Number</label>
-              <input type="text" placeholder="e.g. 0123456789" value={bankAccountNumber}
-                onChange={e => setBankAccountNumber(e.target.value)} className={inputBase} />
-            </div>
-          </div>
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Name</label>
-            <input type="text" placeholder="e.g. Daily Impact Devotional Ministries" value={bankAccountName}
-              onChange={e => setBankAccountName(e.target.value)} className={inputBase} />
-          </div>
+          )}
+
+          {bankAccounts.map((acc, idx) => {
+            const expanded = expandedAccount === acc.id;
+            return (
+              <div key={acc.id} className={`rounded-xl border p-4 space-y-3 ${isDarkMode ? "border-slate-800 bg-slate-950/50" : "border-slate-200 bg-slate-50/60"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-teal-brand/10 text-teal-brand border border-teal-brand/30 shrink-0">
+                      {acc.currency || "NGN"}
+                    </span>
+                    <span className="text-xs font-bold truncate">{acc.bankName || `Bank Account ${idx + 1}`}</span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button type="button" onClick={() => setExpandedAccount(expanded ? null : acc.id)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-teal-brand hover:bg-teal-brand/10 transition-colors"
+                      title={expanded ? "Collapse details" : "Expand details"}>
+                      {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    </button>
+                    <button type="button" onClick={() => removeAccount(acc.id)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                      title="Remove this account">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {expanded && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Bank Name</label>
+                        <input type="text" placeholder="e.g. Zenith Bank" value={acc.bankName}
+                          onChange={e => updateAccount(acc.id, { bankName: e.target.value })} className={inputBase} />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Currency</label>
+                        <select value={acc.currency} onChange={e => updateAccount(acc.id, { currency: e.target.value })}
+                          className={inputBase}>
+                          {BANK_CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Number</label>
+                        <input type="text" placeholder="e.g. 0123456789" value={acc.accountNumber}
+                          onChange={e => updateAccount(acc.id, { accountNumber: e.target.value })} className={inputBase} />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Account Name</label>
+                        <input type="text" placeholder="e.g. Daily Impact Devotional Ministries" value={acc.accountName}
+                          onChange={e => updateAccount(acc.id, { accountName: e.target.value })} className={inputBase} />
+                      </div>
+                    </div>
+
+                    <div className={`rounded-lg border p-3 space-y-3 ${isDarkMode ? "border-slate-800 bg-slate-900/40" : "border-slate-200 bg-white/60"}`}>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">International / Additional Details (optional)</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">SWIFT / BIC Code</label>
+                          <input type="text" placeholder="e.g. ZEIBNGLA" value={acc.swift}
+                            onChange={e => updateAccount(acc.id, { swift: e.target.value })} className={inputBase} />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">IBAN</label>
+                          <input type="text" placeholder="e.g. GB29NWBK60161331926819" value={acc.iban}
+                            onChange={e => updateAccount(acc.id, { iban: e.target.value })} className={inputBase} />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Routing / Sort Code</label>
+                          <input type="text" placeholder="e.g. 123456789" value={acc.routing}
+                            onChange={e => updateAccount(acc.id, { routing: e.target.value })} className={inputBase} />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">International Format</label>
+                          <input type="text" placeholder="e.g. 0123 4567 8901 0000" value={acc.internationalFormat}
+                            onChange={e => updateAccount(acc.id, { internationalFormat: e.target.value })} className={inputBase} />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Other Details / Instructions</label>
+                        <textarea rows={2} placeholder="Any extra information donors need (bank address, payment reference, etc.)"
+                          value={acc.extraDetails}
+                          onChange={e => updateAccount(acc.id, { extraDetails: e.target.value })} className={inputBase} />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <button type="button" onClick={addAccount}
+            className="w-full py-2.5 rounded-xl border-2 border-dashed text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all text-teal-brand border-teal-brand/40 hover:bg-teal-brand/5">
+            <Plus className="w-4 h-4" /> Add Another Bank Account
+          </button>
         </div>
 
         <button onClick={handleSaveBankDetails}

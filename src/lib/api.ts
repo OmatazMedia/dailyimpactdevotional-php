@@ -104,9 +104,19 @@ export async function api<T = unknown>(path: string, options: ApiRequestOptions 
   }
   const signal = controller.signal;
 
+  // Normalize the path: some callers embed the base URL in `path` (e.g.
+  // apiPut(`${API_BASE}/settings.php`, ...)) while others pass it bare
+  // (api("/settings.php")). Stripping a leading duplicate keeps both forms
+  // working — without this, saves to /backend/api/backend/api/... 404 and
+  // settings changes (Telegram, SMTP, payments, bank) silently never persist.
+  let urlPath = path;
+  if (API_BASE !== "" && urlPath.startsWith(API_BASE + "/")) {
+    urlPath = urlPath.slice(API_BASE.length);
+  }
+
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, signal });
+    res = await fetch(`${API_BASE}${urlPath}`, { ...fetchOptions, headers, signal });
   } catch (err) {
     clearTimeout(timeout);
     if (err instanceof Error && err.name === "AbortError") {

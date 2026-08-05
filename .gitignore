@@ -21,6 +21,12 @@ cpanel-upload/
 # ─── Secrets — NEVER commit these ─────────────────────────────────────────
 # Live Telegram credentials (bot token / channel) — local dev seed only.
 src/data/settings.json
+# Mock-server runtime state (generated during npm run dev — real data lives in MySQL).
+src/data/donations.json
+src/data/analytics.json
+src/data/login_log.json
+src/data/telegram_log.json
+src/data/ip_bans.json
 # Auto-generated AES-256 encryption key (created on first server request).
 backend/config/secret.key.php
 

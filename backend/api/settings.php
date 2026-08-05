@@ -57,10 +57,13 @@ switch ($method) {
             'author_name'           => 'Dr. Andy Osakwe',
             'default_currency'      => 'NGN',
             'donation_message'      => 'Thank you for supporting Daily Impact Devotional.',
+            'gateway_currency_map'  => '{"NGN":"paystack","USD":"flutterwave","GBP":"flutterwave"}',
             'bank_transfer_enabled' => 'true',
             'bank_account_name'     => 'Daily Impact Devotional Ministries',
             'bank_account_number'   => '',
             'bank_name'             => '',
+            'bank_accounts'         => '[]',
+            'bank_currency'         => 'NGN',
         ];
 
         $result = array_merge($defaults, $settings);
