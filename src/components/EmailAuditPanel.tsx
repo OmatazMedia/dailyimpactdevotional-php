@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from "react";
-import { Mail, Save, Eye, EyeOff, Shield, Clock, MapPin, Monitor, CheckCircle, XCircle, RefreshCw } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Mail, Save, Eye, EyeOff, Shield, Clock, MapPin, Monitor, CheckCircle, XCircle, RefreshCw, Download, ChevronLeft, ChevronRight } from "lucide-react";
 import { API_BASE } from "../config/api";
 import { apiPut } from "../lib/api";
+
+const AUDIT_MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+  "August", "September", "October", "November", "December"];
 
 interface EmailAuditPanelProps {
   isDarkMode: boolean;
@@ -35,6 +38,11 @@ export default function EmailAuditPanel({ isDarkMode, showToast }: EmailAuditPan
   const [showPass, setShowPass] = useState(false);
   const [loginLog, setLoginLog] = useState<LoginEntry[]>([]);
   const [loadingLog, setLoadingLog] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pages, setPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [month, setMonth] = useState("");
+  const [year, setYear] = useState("");
 
   const cardBase = `rounded-2xl border p-6 space-y-4 ${
     isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-900"
@@ -44,16 +52,25 @@ export default function EmailAuditPanel({ isDarkMode, showToast }: EmailAuditPan
     isDarkMode ? "bg-slate-950 border-slate-800 text-white placeholder:text-slate-600" : "bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400"
   }`;
 
-  const loadLog = () => {
+  const loadLog = useCallback(() => {
     setLoadingLog(true);
-    fetch(`${API_BASE}/login-log.php`)
-      .then(r => r.ok ? r.json() : [])
-      .then((data: LoginEntry[]) => setLoginLog([...data].reverse()))
+    const q = new URLSearchParams({ page: String(page), perPage: "25" });
+    if (month) q.set("month", month);
+    if (year) q.set("year", year);
+    fetch(`${API_BASE}/login-log.php?${q.toString()}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: { items?: LoginEntry[]; total?: number; pages?: number } | null) => {
+        if (data) {
+          setLoginLog(Array.isArray(data.items) ? data.items : []);
+          setPages(data.pages || 1);
+          setTotal(data.total || 0);
+        }
+      })
       .catch(() => showToast("API server not running. Start with: npm run server", "error"))
       .finally(() => setLoadingLog(false));
-  };
+  }, [page, month, year, showToast]);
 
-  useEffect(() => { loadLog(); }, []);
+  useEffect(() => { loadLog(); }, [loadLog]);
 
   useEffect(() => {
     fetch(`${API_BASE}/settings.php`)
@@ -218,6 +235,54 @@ export default function EmailAuditPanel({ isDarkMode, showToast }: EmailAuditPan
           </button>
         </div>
 
+        {/* Month / year filter + CSV export */}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="space-y-1">
+            <label className="block text-[9px] uppercase text-slate-400 font-bold tracking-wider">Month</label>
+            <select
+              value={month}
+              onChange={e => { setMonth(e.target.value); setPage(1); }}
+              className={`py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"}`}
+            >
+              <option value="">All months</option>
+              {AUDIT_MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[9px] uppercase text-slate-400 font-bold tracking-wider">Year</label>
+            <select
+              value={year}
+              onChange={e => { setYear(e.target.value); setPage(1); }}
+              className={`py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"}`}
+            >
+              <option value="">All years</option>
+              {Array.from(new Set([new Date().getFullYear(), new Date().getFullYear() - 1])).sort((a, b) => b - a).map(y => (
+                <option key={y} value={String(y)}>{y}</option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setPage(1); loadLog(); }}
+            className={`inline-flex items-center gap-1.5 py-2 px-3 rounded-lg border text-[10px] font-black uppercase tracking-wider transition-all ${isDarkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-600 hover:bg-slate-100"}`}
+          >
+            <RefreshCw className="w-3 h-3" /> Filter
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const q = new URLSearchParams({ format: "csv", perPage: "200" });
+              if (month) q.set("month", month);
+              if (year) q.set("year", year);
+              window.location.href = `${API_BASE}/login-log.php?${q.toString()}`;
+            }}
+            className="inline-flex items-center gap-1.5 py-2 px-3 rounded-lg border border-teal-brand/30 bg-teal-brand/5 text-teal-brand text-[10px] font-black uppercase tracking-wider hover:bg-teal-brand hover:text-white transition-all"
+          >
+            <Download className="w-3 h-3" /> Export CSV
+          </button>
+          <span className="text-[10px] font-bold text-slate-400">{total} event{total === 1 ? "" : "s"}</span>
+        </div>
+
         {loginLog.length === 0 ? (
           <div className="py-10 text-center">
             <p className="text-sm text-slate-400 italic">
@@ -275,6 +340,33 @@ export default function EmailAuditPanel({ isDarkMode, showToast }: EmailAuditPan
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Pagination */}
+        {total > 0 && (
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Page {page} of {pages}
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={page <= 1}
+                onClick={() => setPage(page - 1)}
+                className={`p-1.5 rounded-lg border transition-all disabled:opacity-30 ${isDarkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-500 hover:bg-slate-100"}`}
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                disabled={page >= pages}
+                onClick={() => setPage(page + 1)}
+                className={`p-1.5 rounded-lg border transition-all disabled:opacity-30 ${isDarkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-500 hover:bg-slate-100"}`}
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
       </div>

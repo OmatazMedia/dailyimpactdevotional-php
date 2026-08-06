@@ -23,6 +23,7 @@ import { Devotional, ForewordPost } from "./types";
 import { API_BASE } from "./config/api";
 import { buildHeaderMap, HeaderMappingRow } from "./lib/headers";
 import { initAnalytics } from "./lib/analytics";
+import { slugForDevotional, findDevotionalBySlug } from "./lib/devotionalSlug";
 
 // Helper to parse date Str and year to local Date object
 export const getDevotionalDateValue = (dateStr: string, year: number): Date => {
@@ -306,14 +307,77 @@ export default function App() {
       const dKey = `${dObj.month} ${dObj.day}, ${dObj.year}`;
       setActiveDateKey(dKey);
 
-      const autoDev = getDevotionalForDate(sortedList, tz);
-      if (autoDev) setSelectedDevotional(autoDev);
+      // Deep link: ?devotional=5-aug-2025 (date slug) or ?devotional=<uuid>
+      // (legacy links) selects that specific devotional instead of today's.
+      // Anything unrecognized falls back to today's devotional.
+      let targetDev: Devotional | null = null;
+      try {
+        const q = new URLSearchParams(window.location.search);
+        targetDev = findDevotionalBySlug(sortedList, q.get("devotional"));
+      } catch { /* malformed query — fall through to today */ }
+      if (!targetDev) targetDev = getDevotionalForDate(sortedList, tz);
+      if (targetDev) setSelectedDevotional(targetDev);
     };
     // finally() always clears the loading state — on success AND on any
     // unexpected rejection — so the skeleton can never get stuck.
     load().finally(() => { if (!cancelled) setIsLoading(false); });
     return () => { cancelled = true; };
   }, [loadDevotionals]);
+
+  // Gateway return callback: after an online donation the donor is redirected
+  // back to /?donation=<reference> (Paystack / Flutterwave). Verify the
+  // transaction server-side and celebrate on success. The URL marker is
+  // cleared afterwards so a refresh doesn't re-verify.
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams(window.location.search);
+    const donationRef = params.get("donation");
+    if (!donationRef) return;
+
+    const verify = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/donations.php?action=verify&reference=${encodeURIComponent(donationRef)}`
+        );
+        const data = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          status?: string;
+          amount?: number;
+          currency?: string;
+          name?: string;
+          is_anonymous?: number;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (data.success && data.status === "success") {
+          setThanksInfo({
+            name: data.is_anonymous ? "" : (data.name || ""),
+            amount: Number(data.amount || 0),
+            currency: String(data.currency || ""),
+            anonymous: !!data.is_anonymous,
+          });
+        } else if (data.status === "failed") {
+          // Failed/cancelled at the gateway — quietly return to the homepage.
+          alert("Your payment was not completed. No charge was made. Please try again.");
+        } else if (data.status === "pending") {
+          // Still pending at the gateway (async confirmation). Don't leave the
+          // donor staring at a blank page — tell them what's happening.
+          alert("Your payment is being confirmed. Once it is verified your receipt and thank-you page will appear. Thank you for your patience.");
+        }
+      } catch {
+        // Network error during verification — stay on the page.
+      } finally {
+        // Clear the ?donation= marker so refresh/re-share shows a clean URL.
+        if (!cancelled) {
+          try {
+            window.history.replaceState(null, "", window.location.pathname);
+          } catch { /* ignore */ }
+        }
+      }
+    };
+    verify();
+    return () => { cancelled = true; };
+  }, []);
 
   // Poll for date change in Admin Timezone (Rollover at 12:00 AM)
   // When the date changes, re-fetch from API
@@ -385,7 +449,7 @@ export default function App() {
       document.title = `${t} — Daily Impact Devotional`;
       setMeta("og:title", t);
       setMeta("og:description", desc);
-      setMeta("og:url", `${window.location.origin}?devotional=${selectedDevotional.id}`);
+      setMeta("og:url", `${window.location.origin}?devotional=${slugForDevotional(selectedDevotional.date, selectedDevotional.year) || selectedDevotional.id}`);
       setName("twitter:title", t);
       setName("twitter:description", desc);
       if (selectedDevotional.imageUrl) {

@@ -17,6 +17,19 @@ if (!fs.existsSync(sourceDir)) {
   process.exit(1);
 }
 
+// Ensure the upload-folder hardening file ships in every deploy (it lives in
+// upload/.htaccess; upload/ is runtime-created so the file must be copied in
+// whenever cpanel-upload is rebuilt).
+const srcUploadHtaccess = path.join(__dirname, 'upload', '.htaccess');
+const dstUploadHtaccess = path.join(sourceDir, 'upload', '.htaccess');
+if (fs.existsSync(srcUploadHtaccess)) {
+  fs.mkdirSync(path.dirname(dstUploadHtaccess), { recursive: true });
+  fs.copyFileSync(srcUploadHtaccess, dstUploadHtaccess);
+  console.log('📋 upload/.htaccess copied into cpanel-upload/');
+} else {
+  console.warn('⚠️  upload/.htaccess not found — upload hardening will be MISSING from the zip.');
+}
+
 // execSync on Windows defaults to cmd.exe, which needs %WINDIR% and quoted paths.
 const bsdtar = '%WINDIR%\\System32\\tar.exe';
 const command = `${bsdtar} -a -cf "${outFile}" -C "${sourceDir}" .`;

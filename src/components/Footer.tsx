@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { API_BASE } from "../config/api";
-import { Facebook, Twitter, Instagram, Youtube, Mail, Phone, ArrowUp, Heart, Play } from "lucide-react";
-import InstallGuideModal from "./InstallGuideModal";
-import { getPwaState, initPwa, promptInstall, subscribePwa } from "../lib/pwa";
+import { Facebook, Twitter, Instagram, Youtube, Mail, Phone, ArrowUp, Heart } from "lucide-react";
 
 interface FooterProps {
   isDarkMode: boolean;
@@ -30,9 +28,6 @@ const BIBLE_KEYS = [
 
 export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: FooterProps) {
   const [settings, setSettings] = useState<Record<string, string>>({});
-  const [pwa, setPwa] = useState(getPwaState);
-  const [guideOpen, setGuideOpen] = useState(false);
-  const [guideMode, setGuideMode] = useState<"ios" | "browser">("browser");
 
   useEffect(() => {
     fetch(`${API_BASE}/settings.php`)
@@ -42,30 +37,6 @@ export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: F
       })
       .catch(() => {});
   }, []);
-
-  // Keep the install badge in sync with the browser's installability state.
-  useEffect(() => {
-    initPwa();
-    const sync = () => setPwa({ ...getPwaState() });
-    sync();
-    return subscribePwa(sync);
-  }, []);
-
-  // Google-Play-style badge tap → native prompt, or guide for iOS/desktop.
-  const handleInstallTap = async () => {
-    if (pwa.isIOS) {
-      setGuideMode("ios");
-      setGuideOpen(true);
-      return;
-    }
-    const outcome = await promptInstall();
-    if (outcome === "unavailable") {
-      setGuideMode("browser");
-      setGuideOpen(true);
-    }
-  };
-
-  const showInstallBadge = !pwa.isInstalled && !pwa.isStandalone;
 
   const telegramQrImage     = settings.telegram_qr_code_image || "/assets/images/dailyImpactQrcode.jpeg";
   const telegramChannelLink = settings.telegram_channel_link  || "https://t.me/dailyimpactdevotional";
@@ -158,9 +129,12 @@ export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: F
             </a>
           </div>
 
-          {/* Card 3 — Sponsor Devotionals (wrapped so button can overflow) */}
+          {/* Card 3 — Sponsor Devotionals (wrapped so button can overflow)
+              Mobile: portrait book-cover shape (taller than wide) so the
+              sponsor cover mimics a devotional book; md+: stretches to the
+              column height exactly as before. */}
           <div className="relative">
-            <div className={`rounded-2xl border overflow-hidden relative group cursor-pointer h-full ${card}`} onClick={onOpenDonate}>
+            <div className={`rounded-2xl border overflow-hidden relative group cursor-pointer h-full aspect-[3/4] md:aspect-auto flex flex-col ${card}`} onClick={onOpenDonate}>
               <img
                 src={sponsorCoverImage}
                 alt="Sponsor Devotionals"
@@ -169,7 +143,7 @@ export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: F
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
               {/* Text centered at the bottom */}
-              <div className="relative min-h-[220px] flex flex-col items-center justify-end px-5 pt-5 pb-16 gap-1 text-center">
+              <div className="relative flex-1 min-h-[220px] flex flex-col items-center justify-end px-5 pt-5 pb-16 gap-1 text-center">
                 <p className="text-[9px] font-black uppercase tracking-widest text-white/60">
                   Support the Ministry
                 </p>
@@ -194,32 +168,6 @@ export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: F
 
         {/* Divider */}
         <div className={`w-full h-px ${divider}`} />
-
-        {/* Get the App — Google-Play-style install badge (hidden once installed) */}
-        {showInstallBadge && (
-          <div className="flex justify-center pt-1">
-            <button
-              onClick={handleInstallTap}
-              className="group inline-flex items-center gap-3 rounded-xl px-4 py-2.5 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-700/60 shadow-[0_10px_30px_-10px_rgba(2,6,23,0.6)] transition-all active:scale-[0.97]"
-              aria-label="Install Daily Impact app"
-            >
-              <span className="relative flex items-center justify-center">
-                <span className="absolute inline-flex h-8 w-8 rounded-full bg-teal-brand/0 group-hover:bg-teal-brand/20 transition-colors" />
-                <span className="w-8 h-8 rounded-lg bg-teal-brand flex items-center justify-center">
-                  <Play className="w-4 h-4 text-white fill-white ml-0.5" />
-                </span>
-              </span>
-              <span className="text-left leading-none">
-                <span className="block text-[8px] font-bold uppercase tracking-[0.2em] text-slate-400">
-                  Get it on
-                </span>
-                <span className="block mt-1 text-[13px] font-black text-white tracking-wide">
-                  Daily Impact App
-                </span>
-              </span>
-            </button>
-          </div>
-        )}
 
         {/* Bottom bar — left / center / right */}
         <div className="flex flex-col md:flex-row items-center justify-between gap-4 text-[10px]">
@@ -290,13 +238,6 @@ export default function Footer({ isDarkMode, onNavigateAuthor, onOpenDonate }: F
 
       </div>
 
-      {/* Manual install instructions (iOS / non-Chromium fallback) */}
-      <InstallGuideModal
-        open={guideOpen}
-        onClose={() => setGuideOpen(false)}
-        isDarkMode={isDarkMode}
-        mode={guideMode}
-      />
     </footer>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { Sun, Moon, Monitor, Menu, X, Heart } from "lucide-react";
+import { Sun, Moon, Monitor, X, Heart } from "lucide-react";
+import AnimatedHamburger from "./AnimatedHamburger";
 
 interface NavbarProps {
   activeTab: "devotional" | "list" | "dashboard" | "foreword" | "author";
@@ -59,6 +60,21 @@ export default function Navbar({
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [themeDropdownOpen]);
+
+  // Lock page scroll while the mobile drawer is open (and close on Escape).
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsMobileMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [isMobileMenuOpen]);
 
   const navItems = [
     { id: "devotional", label: "HOME" },
@@ -249,62 +265,98 @@ export default function Navbar({
               )}
             </div>
 
-            {/* Hamburger Button */}
-            <button
+            {/* Hamburger Button (animated) */}
+            <AnimatedHamburger
+              open={isMobileMenuOpen}
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
               className={`p-1.5 rounded-lg border ${
                 isDarkMode
                   ? "bg-slate-800 border-slate-700 text-slate-300"
                   : "bg-slate-50 border-slate-200 text-slate-600"
               }`}
-            >
-              {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-            </button>
+            />
           </div>
 
         </div>
 
-        {/* Mobile Drawer Navigation */}
-        {isMobileMenuOpen && (
+      </nav>
+
+      {/* Mobile Drawer Navigation — fixed panel slides in from the LEFT with
+          a page overlay (replaces the old top drop-down). Rendered outside
+          the backdrop-blurred <nav> so fixed positioning tracks the viewport. */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-[80] md:hidden">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-in fade-in duration-300"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+          {/* Drawer panel */}
           <div
             id="mobile-menu-drawer"
-            className={`absolute top-full left-0 right-0 mt-2 p-4 rounded-2xl shadow-xl border md:hidden space-y-3 z-50 ${
+            role="dialog"
+            aria-modal="true"
+            aria-label="Site navigation"
+            className={`absolute inset-y-0 left-0 w-[78%] max-w-[300px] shadow-2xl border-r p-5 overflow-y-auto overscroll-contain animate-in slide-in-from-left-3 duration-300 ${
               isDarkMode
-                ? "bg-slate-900/95 border-slate-800 text-slate-100"
-                : "bg-white/95 border-slate-200 text-slate-800"
-            } backdrop-blur-lg animate-in fade-in slide-in-from-top-3 duration-300`}
+                ? "bg-slate-900/98 border-slate-800 text-slate-100"
+                : "bg-white/98 border-slate-200 text-slate-800"
+            }`}
           >
-            {navItems.map((item) => (
+            <div className="flex items-center justify-between mb-5">
+              <div className="p-1 rounded-xl bg-white/10 dark:bg-white/95">
+                <img
+                  src="/assets/images/dailyimpact.png"
+                  alt="Daily Impact Devotional"
+                  className="h-8 w-auto object-contain"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
               <button
-                key={item.id}
-                onClick={() => {
-                  setActiveTab(item.id);
-                  setIsMobileMenuOpen(false);
-                }}
-                className={`w-full text-left py-2 px-4 rounded-xl text-xs font-bold tracking-widest transition-all ${
-                  activeTab === item.id
-                    ? "bg-teal-brand/10 text-teal-brand font-black"
-                    : isDarkMode
-                    ? "text-slate-300 hover:bg-slate-800/50 hover:text-white"
-                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                onClick={() => setIsMobileMenuOpen(false)}
+                aria-label="Close menu"
+                className={`p-1.5 rounded-lg border transition-all ${
+                  isDarkMode
+                    ? "bg-slate-800 border-slate-700 text-slate-300"
+                    : "bg-slate-50 border-slate-200 text-slate-600"
                 }`}
               >
-                {item.label}
+                <X className="w-4 h-4" />
               </button>
-            ))}
+            </div>
+            <div className="space-y-1.5">
+              {navItems.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full text-left py-2.5 px-4 rounded-xl text-xs font-bold tracking-widest transition-all ${
+                    activeTab === item.id
+                      ? "bg-teal-brand/10 text-teal-brand font-black"
+                      : isDarkMode
+                      ? "text-slate-300 hover:bg-slate-800/50 hover:text-white"
+                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
                 setIsMobileMenuOpen(false);
                 onOpenDonate();
               }}
-              className="w-full py-2.5 bg-teal-brand text-white font-bold text-xs tracking-widest rounded-xl shadow-sm transition-all flex items-center justify-center gap-1.5 uppercase"
+              className="mt-4 w-full py-2.5 bg-teal-brand text-white font-bold text-xs tracking-widest rounded-xl shadow-sm transition-all flex items-center justify-center gap-1.5 uppercase"
             >
               <Heart className="w-4 h-4 fill-current" />
               Donate
             </button>
           </div>
-        )}
-      </nav>
+        </div>
+      )}
     </div>
   );
 }

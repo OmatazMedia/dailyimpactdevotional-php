@@ -186,3 +186,18 @@ section[id^="devotional-body"] a {
 .ql-align-center { text-align: center; }
 .ql-align-right { text-align: right; }
 .ql-align-justify { text-align: justify; }
+
+/* ── 2FA OTP input feedback animations ─────────────────────────────────── */
+@keyframes otp-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.otp-shake { animation: otp-shake 0.5s ease; }
+
+@keyframes otp-flash-green {
+  0%, 100% { background-color: transparent; }
+  30%, 60% { background-color: rgba(16, 185, 129, 0.25); }
+}
+.otp-flash-green { animation: otp-flash-green 0.9s ease; }

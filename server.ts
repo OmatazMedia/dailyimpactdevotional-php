@@ -8,6 +8,7 @@ import express, { Request, Response } from "express";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +27,21 @@ const DONATIONS_FILE = path.join(DATA_DIR, "donations.json");
 const LOGIN_LOG_FILE = path.join(DATA_DIR, "login_log.json");
 const ADMIN_FILE = path.join(DATA_DIR, "admin.json");
 const ANALYTICS_FILE = path.join(DATA_DIR, "analytics.json");
+const AUDIT_MONTHS_LOWER = ["january", "february", "march", "april", "may", "june", "july",
+  "august", "september", "october", "november", "december"];
+
+// ── Mock IP ban store (dev mirror of the PHP ip_bans table) ────────────────
+interface IpBanMock {
+  id: string; ipAddress: string; cidr: string; reason: string; email: string;
+  source: string; failedAttempts: number; active: boolean; whitelisted: boolean; createdAt: string;
+}
+const IP_BANS_FILE = path.join(DATA_DIR, "ip_bans.json");
+function readIpBans(): IpBanMock[] { return readJson<IpBanMock[]>(IP_BANS_FILE, []); }
+function writeIpBans(bans: IpBanMock[]): void { writeJson(IP_BANS_FILE, bans); }
+function mockSubnet(ip: string): string {
+  const parts = ip.split(".");
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : ip;
+}
 
 // Ensure all data directories exist on startup
 [DATA_DIR, UPLOADS_DIR].forEach((dir) => {
@@ -296,14 +312,85 @@ app.delete("/api/foreword/:id", (req: Request, res: Response) => {
 });
 
 // ─── DONATIONS ──────────────────────────────────────────────────────────────────
+// Mirrors the real backend: online providers (paystack/flutterwave) create a
+// PENDING row and return an authorization_url; the mock "gateway" immediately
+// redirects back to /?donation=<reference> where ?action=verify marks it paid.
+// Bank/manual donations are recorded as success straight away.
 
-app.get("/api/donations", (_req, res) => {
+app.get("/api/donations", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  if (action === "verify") {
+    const reference = String(req.query.reference ?? "");
+    const list = readJson<Record<string, unknown>[]>(DONATIONS_FILE, []);
+    const idx = list.findIndex((r) => r.reference === reference);
+    if (idx === -1) {
+      res.status(404).json({ success: false, error: "Donation not found for this reference" });
+      return;
+    }
+    // Mock gateway: the redirect already represents a successful payment.
+    list[idx] = { ...list[idx], status: "success" };
+    writeJson(DONATIONS_FILE, list);
+    const row = list[idx] as Record<string, unknown>;
+    res.json({
+      success: true,
+      status: "success",
+      reference,
+      provider: row.provider ?? "paystack",
+      amount: Number(row.amount ?? 0),
+      currency: row.currency ?? "NGN",
+      name: row.name ?? "",
+      is_anonymous: Number(row.is_anonymous ?? 0),
+    });
+    return;
+  }
+  // Admin listing
   res.json(readJson<object[]>(DONATIONS_FILE, []));
 });
 
 app.post("/api/donations", (req: Request, res: Response) => {
-  const list = readJson<object[]>(DONATIONS_FILE, []);
-  const record = { ...req.body, id: generateId(), date: new Date().toISOString() };
+  const provider = String(req.body.provider ?? "manual");
+  const list = readJson<Record<string, unknown>[]>(DONATIONS_FILE, []);
+
+  if (provider === "paystack" || provider === "flutterwave") {
+    // Real flow: pending row + hosted checkout URL (mock gateway auto-pays by
+    // sending the donor straight back to /?donation=<reference>).
+    const reference = `DID-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const record: Record<string, unknown> = {
+      id: generateId(),
+      reference,
+      amount: Number(req.body.amount ?? 0),
+      currency: req.body.currency ?? "NGN",
+      email: req.body.email ?? "",
+      name: req.body.name ?? "",
+      phone: req.body.phone ?? "",
+      provider,
+      status: "pending",
+      is_anonymous: req.body.is_anonymous ? 1 : 0,
+      date: new Date().toISOString(),
+    };
+    list.push(record);
+    writeJson(DONATIONS_FILE, list);
+    const origin = req.headers.origin ?? `http://localhost:${PORT}`;
+    res.status(201).json({
+      id: record.id,
+      reference,
+      authorization_url: `${origin}/?donation=${encodeURIComponent(reference)}`,
+      status: "pending",
+      provider,
+      amount: record.amount,
+      currency: record.currency,
+      is_anonymous: record.is_anonymous,
+    });
+    return;
+  }
+
+  // Bank / manual: recorded as received.
+  const record: Record<string, unknown> = {
+    ...req.body,
+    id: generateId(),
+    status: "success",
+    date: new Date().toISOString(),
+  };
   list.push(record);
   writeJson(DONATIONS_FILE, list);
   res.status(201).json(record);
@@ -332,36 +419,54 @@ app.post("/api/webhook/payment", async (req: Request, res: Response) => {
     };
   };
 
-  // Parse Paystack-style event
+  // Parse Paystack-style event — mirrors production fail-closed behavior:
+  // only references that EXIST as pending donations are accepted, and the
+  // amount must match the stored row.
   if (event?.data) {
     const d = event.data;
-    const record = {
-      id: generateId(),
-      reference: d.reference ?? "",
-      amount: (d.amount ?? 0) / 100, // Paystack sends kobo
-      currency: d.currency ?? "NGN",
-      email: d.customer?.email ?? "",
-      name: `${d.customer?.first_name ?? ""} ${d.customer?.last_name ?? ""}`.trim(),
-      provider: "paystack" as const,
-      status: d.status === "success" ? "success" : "pending",
-      date: new Date().toISOString(),
-    };
-    const list = readJson<object[]>(DONATIONS_FILE, []);
-    // Avoid duplicate references
-    const exists = (list as { reference?: string }[]).some(r => r.reference === record.reference);
-    if (!exists) {
-      list.push(record);
-      writeJson(DONATIONS_FILE, list);
-      console.log(`[Webhook] Donation recorded: ${record.currency} ${record.amount} from ${record.email}`);
+    const reference = String(d.reference ?? "");
+    const amount = (d.amount ?? 0) / 100; // Paystack sends kobo
+    const currency = String(d.currency ?? "NGN");
+    const status = d.status === "success" ? "success" : "pending";
 
-      // Send email notification if configured
-      const notifyEmail = (settings.notify_email as string) ?? "";
-      if (notifyEmail) {
-        sendEmailNotification(notifyEmail,
-          `💰 New Donation Received — ${record.currency} ${record.amount.toLocaleString()}`,
-          `A donation was received:\n\nAmount: ${record.currency} ${record.amount.toLocaleString()}\nFrom: ${record.name || record.email}\nProvider: Paystack\nReference: ${record.reference}\nDate: ${new Date().toLocaleString()}`
-        );
-      }
+    const list = readJson<Record<string, unknown>[]>(DONATIONS_FILE, []);
+    const idx = list.findIndex((r) => r.reference === reference);
+    if (idx === -1) {
+      console.log(`[Webhook] REJECTED: unknown reference ${reference}`);
+      res.status(404).json({ success: false, error: "Unknown transaction reference" });
+      return;
+    }
+    const stored = list[idx] as { amount?: number; currency?: string; status?: string };
+    if (stored.amount != null && amount > 0 && Math.abs(amount - Number(stored.amount)) > 0.01) {
+      console.log(`[Webhook] REJECTED: amount mismatch for ${reference}`);
+      res.status(400).json({ success: false, error: "Amount mismatch" });
+      return;
+    }
+    // Never downgrade a confirmed payment.
+    if (stored.status === "success" && status !== "success") {
+      res.json({ success: true, updated: false, status: stored.status });
+      return;
+    }
+
+    list[idx] = {
+      ...list[idx],
+      amount,
+      currency,
+      status,
+      provider: "paystack",
+      email: d.customer?.email ?? list[idx].email ?? "",
+      name: `${d.customer?.first_name ?? ""} ${d.customer?.last_name ?? ""}`.trim() || list[idx].name,
+    };
+    writeJson(DONATIONS_FILE, list);
+    console.log(`[Webhook] Donation confirmed: ${currency} ${amount} (${reference})`);
+
+    // Send email notification if configured
+    const notifyEmail = (settings.notify_email as string) ?? "";
+    if (notifyEmail && status === "success") {
+      sendEmailNotification(notifyEmail,
+        `💰 New Donation Received — ${currency} ${amount.toLocaleString()}`,
+        `A donation was received:\n\nAmount: ${currency} ${amount.toLocaleString()}\nFrom: ${String(list[idx].name ?? list[idx].email ?? "")}\nProvider: Paystack\nReference: ${reference}\nDate: ${new Date().toLocaleString()}`
+      );
     }
   }
 
@@ -382,17 +487,99 @@ const loginFailures = new Map<string, number>();
 // ip_bans — the mock keeps them in-memory for the dev session).
 const mockBannedIps = new Set<string>();
 
-interface AdminRecord { email: string; password: string; name: string; }
+interface TwoFaState {
+  totpSecret?: string;
+  totpEnabled?: boolean;
+  emailOtpEnabled?: boolean;
+  backupCodes?: string[];
+}
+interface AdminRecord { email: string; password: string; name: string; bio?: string; twofa?: TwoFaState; }
 
 function readAdmin(): AdminRecord {
-  const fallback: AdminRecord = { email: "admin@ministries.org", password: "admin123", name: "Admin" };
+  const fallback: AdminRecord = { email: "admin@ministries.org", password: "admin123", name: "Admin", bio: "" };
   const data = readJson<Partial<AdminRecord> | null>(ADMIN_FILE, null);
   if (!data || typeof data.email !== "string" || !data.email) return fallback;
   return {
     email: data.email,
     password: typeof data.password === "string" ? data.password : "admin123",
     name: typeof data.name === "string" ? data.name : "Admin",
+    bio: typeof data.bio === "string" ? data.bio : "",
+    twofa: data.twofa,
   };
+}
+
+function saveAdmin(admin: AdminRecord): void {
+  writeJson(ADMIN_FILE, admin);
+}
+
+// ─── Mock 2FA helpers (mirror backend/api/2fa.php) ─────────────────────────────
+// Pending-login state (mirrors PHP's $_SESSION['pending_2fa']).
+const mockPending2fa = new Map<string, { email: string }>();
+// TOTP secret generator (base32 alphabet — matches the PHP generateTotpSecret).
+function mockGenSecret(): string {
+  const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let s = "";
+  for (let i = 0; i < 32; i++) s += alpha[Math.floor(Math.random() * alpha.length)];
+  return s;
+}
+// 8-char uppercase hex backup codes (matches PHP generateBackupCodes).
+function mockGenBackupCodes(n = 5): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push(Math.floor(Math.random() * 0x100000000).toString(16).toUpperCase().padStart(8, "0"));
+  }
+  return out;
+}
+function mockTwofaState(admin: AdminRecord): TwoFaState {
+  return admin.twofa ?? { totpSecret: "", totpEnabled: false, emailOtpEnabled: false, backupCodes: [] };
+}
+
+// ── REAL RFC 6238 TOTP (mirrors the PHP engine) so the authenticator-app flow
+//    works exactly as in production — scan the QR, get a real code, verify it.
+const B32_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function b32Decode(s: string): Buffer {
+  const clean = s.toUpperCase().replace(/[^A-Z2-7]/g, "");
+  let bits = 0, val = 0;
+  const out: number[] = [];
+  for (const ch of clean) {
+    const idx = B32_ALPHA.indexOf(ch);
+    if (idx === -1) continue;
+    val = (val << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((val >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function mockTotpValid(secret: string, code: string): boolean {
+  if (!secret || code.length !== 6) return false;
+  const now = Date.now();
+  for (let w = -1; w <= 1; w++) {
+    // Compute at a fixed offset for the window check.
+    const counter = BigInt(Math.floor(now / 1000 / 30) + w);
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64BE(counter, 0);
+    const hash = crypto.createHmac("sha1", b32Decode(secret)).update(buf).digest();
+    const offset = hash[hash.length - 1] & 0x0f;
+    const bin = ((hash[offset] & 0x7f) << 24) | (hash[offset + 1] << 16) | (hash[offset + 2] << 8) | hash[offset + 3];
+    if (String(bin % 10 ** 6).padStart(6, "0") === code) return true;
+  }
+  return false;
+}
+// Email OTPs can't be delivered locally — the mock stores them and prints them
+// to the dev-server console (look for "[mock-2fa] Email OTP for ...").
+const mockEmailOtps = new Map<string, { code: string; expires: number }>();
+function sendMockEmailOtp(email: string): void {
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  mockEmailOtps.set(email, { code, expires: Date.now() + 10 * 60 * 1000 });
+  console.log(`[mock-2fa] Email OTP for ${email}: ${code}`);
+}
+function mockEmailOtpValid(email: string, code: string): boolean {
+  const entry = mockEmailOtps.get(email);
+  if (!entry || entry.expires < Date.now()) return false;
+  return entry.code === code;
 }
 
 function parseCookies(header?: string): Record<string, string> {
@@ -427,7 +614,7 @@ app.get("/api/admin", (req: Request, res: Response) => {
     const ip = String(req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ?? req.socket.remoteAddress ?? "local");
     const banned = mockBannedIps.has(ip);
     res.json(user
-      ? { loggedIn: true, user: { email: user.email, name: user.name }, banned }
+      ? { loggedIn: true, user: { email: user.email, name: user.name, bio: readAdmin().bio ?? "" }, banned }
       : { loggedIn: false, user: null, banned });
     return;
   }
@@ -516,6 +703,23 @@ app.post("/api/admin", (req: Request, res: Response) => {
     // Success clears the failure counter for this IP.
     loginFailures.delete(ip);
 
+    // ── 2FA gate (mirrors admin.php): don't log in yet — require a code. ──
+    const twofaState = mockTwofaState(admin);
+    const methods: string[] = [];
+    if (twofaState.totpEnabled) methods.push("app");
+    if (twofaState.emailOtpEnabled) methods.push("email");
+    if (methods.length > 0) {
+      const pendingToken = generateId() + generateId();
+      mockPending2fa.set(pendingToken, { email: admin.email });
+      res.json({
+        success: true,
+        twofaRequired: true,
+        pendingToken,
+        twofa: { enabled: true, methods, backupRemaining: twofaState.backupCodes?.length ?? 0 },
+      });
+      return;
+    }
+
     const token = generateId() + generateId();
     adminSessions.set(token, { email: admin.email, name: admin.name, lastSeen: Date.now() });
     res.setHeader("Set-Cookie", `did_admin=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`);
@@ -531,7 +735,210 @@ app.post("/api/admin", (req: Request, res: Response) => {
     return;
   }
 
+  if (action === "update-profile") {
+    const user = getSessionUser(req);
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const admin = readAdmin();
+    const name = String(req.body?.name ?? "").trim();
+    const email = String(req.body?.email ?? "").trim();
+    const bio = String(req.body?.bio ?? "").trim();
+    if (!name) { res.status(400).json({ success: false, error: "Name is required." }); return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { res.status(400).json({ success: false, error: "Enter a valid email address." }); return; }
+    admin.name = name;
+    admin.email = email;
+    admin.bio = bio;
+    saveAdmin(admin);
+    // Update the live session display name.
+    const token = parseCookies(req.headers.cookie)["did_admin"];
+    const s = token ? adminSessions.get(token) : undefined;
+    if (s) s.name = name;
+    res.json({ success: true, user: { name, email, bio } });
+    return;
+  }
+
   res.status(400).json({ error: "Invalid action. Use: login, logout" });
+});
+
+// ─── 2FA (mock of backend/api/2fa.php) ────────────────────────────────────────
+// TOTP/email codes accept any 6-digit input locally (dev convenience); backup
+// codes are real and consumed on use. 2FA state persists in admin.json.
+app.get("/api/2fa", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  if (action === "status") {
+    const user = getSessionUser(req);
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const t = mockTwofaState(readAdmin());
+    const methods: string[] = [];
+    if (t.totpEnabled) methods.push("app");
+    if (t.emailOtpEnabled) methods.push("email");
+    res.json({ success: true, twofa: { enabled: methods.length > 0, methods, backupRemaining: t.backupCodes?.length ?? 0 } });
+    return;
+  }
+  res.status(400).json({ error: "Invalid action. Use: status" });
+});
+
+app.post("/api/2fa", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  const body = (req.body ?? {}) as Record<string, any>;
+  const user = getSessionUser(req);
+  const code = String(body.code ?? "").replace(/\D/g, "");
+
+  const buildIssuerUrl = (secret: string) => {
+    const admin = readAdmin();
+    const issuer = "Daily Impact Devotional";
+    const account = admin.name || admin.email;
+    return `otpauth://totp/${encodeURIComponent(issuer + ":" + account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  };
+
+  // setup-totp — mint + persist a secret (2FA stays disabled until confirmed).
+  if (action === "setup-totp") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const secret = mockGenSecret();
+    const admin = readAdmin();
+    admin.twofa = { ...mockTwofaState(admin), totpSecret: secret, totpEnabled: false };
+    saveAdmin(admin);
+    res.json({ success: true, secret, otpauth: buildIssuerUrl(secret) });
+    return;
+  }
+
+  // confirm-totp — verify the REAL code from the authenticator app, then enable.
+  if (action === "confirm-totp") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const admin = readAdmin();
+    const t = mockTwofaState(admin);
+    if (!mockTotpValid(t.totpSecret ?? "", code)) { res.status(400).json({ error: "Invalid code. Please enter the current code from your authenticator app." }); return; }
+    const backupCodes = mockGenBackupCodes(5);
+    admin.twofa = { ...t, totpEnabled: true, backupCodes };
+    saveAdmin(admin);
+    res.json({ success: true, backupCodes });
+    return;
+  }
+
+  // send-email-otp — store the OTP and print it to the dev console.
+  if (action === "send-email-otp") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    sendMockEmailOtp(readAdmin().email);
+    res.json({ success: true, message: `A verification code was sent to ${readAdmin().email}.` });
+    return;
+  }
+
+  // confirm-email — verify the emailed code, enable email 2FA, mint backup codes.
+  if (action === "confirm-email") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    if (code.length !== 6 || !mockEmailOtpValid(user.email, code)) { res.status(400).json({ error: "Invalid code. Please check your email for the 6-digit code." }); return; }
+    mockEmailOtps.delete(user.email);
+    const backupCodes = mockGenBackupCodes(5);
+    const admin = readAdmin();
+    admin.twofa = { ...mockTwofaState(admin), emailOtpEnabled: true, backupCodes };
+    saveAdmin(admin);
+    res.json({ success: true, backupCodes });
+    return;
+  }
+
+  // send-login-otp — email an OTP to the pending 2FA user (printed to console).
+  if (action === "send-login-otp") {
+    const pending = mockPending2fa.get(String(body.token ?? ""));
+    if (!pending) { res.status(400).json({ error: "Invalid or expired verification session." }); return; }
+    sendMockEmailOtp(pending.email);
+    res.json({ success: true, message: `A verification code was sent to ${pending.email}.` });
+    return;
+  }
+
+  // verify — finish the pending login with an app/email/backup code.
+  if (action === "verify") {
+    const pending = mockPending2fa.get(String(body.token ?? ""));
+    if (!pending) { res.status(400).json({ error: "Invalid or expired verification session. Please log in again." }); return; }
+    const admin = readAdmin();
+    const t = mockTwofaState(admin);
+    const method = String(body.method ?? "");
+    let backupUsed = false;
+    let remaining = t.backupCodes?.length ?? 0;
+
+    if (method === "backup") {
+      const target = String(body.code ?? "").trim().toUpperCase();
+      const codes = (t.backupCodes ?? []).slice();
+      const idx = codes.findIndex((c) => c.toUpperCase() === target);
+      if (idx === -1) { res.status(400).json({ error: "Invalid backup code." }); return; }
+      codes.splice(idx, 1);
+      admin.twofa = { ...t, backupCodes: codes };
+      saveAdmin(admin);
+      remaining = codes.length;
+      backupUsed = true;
+    } else if (method === "app") {
+      if (!mockTotpValid(t.totpSecret ?? "", code)) { res.status(400).json({ error: "Invalid code. Please check your authenticator app and try again." }); return; }
+    } else if (method === "email") {
+      if (!mockEmailOtpValid(pending.email, code)) { res.status(400).json({ error: "Invalid code. Please check your email for the 6-digit code." }); return; }
+      mockEmailOtps.delete(pending.email);
+    } else {
+      res.status(400).json({ error: "Invalid verification method." }); return;
+    }
+
+    mockPending2fa.delete(String(body.token ?? ""));
+    const token = generateId() + generateId();
+    adminSessions.set(token, { email: admin.email, name: admin.name, lastSeen: Date.now() });
+    res.setHeader("Set-Cookie", `did_admin=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`);
+    res.json({
+      success: true,
+      user: { email: admin.email, name: admin.name, role: "Administrator" },
+      backupUsed,
+      backupRemaining: remaining,
+      backupCodesLow: remaining <= 1,
+    });
+    return;
+  }
+
+  // deactivate — disable a method (needs a live code for that method).
+  if (action === "deactivate") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const method = String(body.method ?? "");
+    const admin = readAdmin();
+    const t = mockTwofaState(admin);
+    if (method === "app" && t.totpEnabled && mockTotpValid(t.totpSecret ?? "", code)) {
+      admin.twofa = { ...t, totpEnabled: false, totpSecret: "" };
+    } else if (method === "email" && t.emailOtpEnabled && mockEmailOtpValid(user.email, code)) {
+      mockEmailOtps.delete(user.email);
+      admin.twofa = { ...t, emailOtpEnabled: false };
+    } else if (method === "backup") {
+      const target = String(body.code ?? "").trim().toUpperCase();
+      const codes = (t.backupCodes ?? []).slice();
+      const idx = codes.findIndex((c) => c.toUpperCase() === target);
+      if (idx === -1) { res.status(400).json({ error: "Invalid code." }); return; }
+      codes.splice(idx, 1);
+      admin.twofa = { ...t, totpEnabled: false, emailOtpEnabled: false, backupCodes: codes };
+    } else {
+      res.status(400).json({ error: "Invalid code." }); return;
+    }
+    if (!admin.twofa.totpEnabled && !admin.twofa.emailOtpEnabled) admin.twofa.backupCodes = [];
+    saveAdmin(admin);
+    const methods: string[] = [];
+    if (admin.twofa.totpEnabled) methods.push("app");
+    if (admin.twofa.emailOtpEnabled) methods.push("email");
+    res.json({ success: true, twofa: { enabled: methods.length > 0, methods, backupRemaining: admin.twofa.backupCodes?.length ?? 0 } });
+    return;
+  }
+
+  // regenerate-backup — fresh set, replaces the old one.
+  if (action === "regenerate-backup") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const backupCodes = mockGenBackupCodes(5);
+    const admin = readAdmin();
+    admin.twofa = { ...mockTwofaState(admin), backupCodes };
+    saveAdmin(admin);
+    res.json({ success: true, backupCodes });
+    return;
+  }
+
+  // admin-reset — wipe 2FA for the (single, local) admin account.
+  if (action === "admin-reset") {
+    if (!user) { res.status(401).json({ error: "Unauthorized. Please log in first." }); return; }
+    const admin = readAdmin();
+    admin.twofa = { totpSecret: "", totpEnabled: false, emailOtpEnabled: false, backupCodes: [] };
+    saveAdmin(admin);
+    res.json({ success: true, message: "2FA has been reset." });
+    return;
+  }
+
+  res.status(400).json({ error: "Invalid action. Use: setup-totp, confirm-totp, send-email-otp, confirm-email, send-login-otp, verify, deactivate, regenerate-backup, admin-reset" });
 });
 
 // ─── WEBSITE ANALYTICS (mock of backend/api/analytics.php) ────────────────────────
@@ -733,9 +1140,24 @@ interface LoginLogEntry {
   location?: string;
 }
 
-// GET login log
-app.get("/api/login-log", (_req, res) => {
-  res.json(readJson<LoginLogEntry[]>(LOGIN_LOG_FILE, []).slice(-200));
+// GET login log — paginated with month/year filter (+ CSV export)
+app.get("/api/login-log", (req: Request, res: Response) => {
+  const all = readJson<LoginLogEntry[]>(LOGIN_LOG_FILE, []);
+  const month = String(req.query.month ?? "");
+  const year = String(req.query.year ?? "");
+  let rows = [...all];
+  if (year) rows = rows.filter(e => new Date(e.timestamp).getFullYear() === parseInt(year, 10));
+  if (month) {
+    const mIdx = AUDIT_MONTHS_LOWER.indexOf(month.toLowerCase());
+    if (mIdx >= 0) rows = rows.filter(e => new Date(e.timestamp).getMonth() === mIdx);
+  }
+  rows.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  const perPage = Math.min(200, Math.max(10, parseInt(String(req.query.perPage ?? "25"), 10)));
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  const page = Math.min(Math.max(1, parseInt(String(req.query.page ?? "1"), 10)), pages);
+  const items = rows.slice((page - 1) * perPage, page * perPage);
+  res.json({ items, total, page, pages, perPage });
 });
 
 // POST record a login event (called from the frontend on login success)
@@ -790,6 +1212,155 @@ app.post("/api/login-log", async (req: Request, res: Response) => {
 
   console.log(`[Login] ${success ? "✅" : "❌"} ${email} from ${ip} (${location})`);
   res.status(201).json({ success: true, entry });
+});
+
+// ─── IP BANS (mock mirror of backend/api/ip-bans.php) ────────────────────────────
+app.get("/api/ip-bans", (req: Request, res: Response) => {
+  if (req.query.action === "check") {
+    const ip = String(req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ?? "127.0.0.1");
+    const ban = readIpBans().find(b => b.active && !b.whitelisted && (b.ipAddress === ip || ip.startsWith(b.cidr.split("/")[0])));
+    res.json({ banned: !!ban, whitelisted: readIpBans().some(b => b.whitelisted && b.active && (b.ipAddress === ip || ip.startsWith(b.cidr.split("/")[0]))), ban: ban ?? null });
+    return;
+  }
+  const all = readIpBans();
+  const scope = String(req.query.scope ?? "active");
+  const month = String(req.query.month ?? "");
+  const year = String(req.query.year ?? "");
+  let rows = all.filter(b => scope === "all" ? true : scope === "whitelisted" ? b.whitelisted : b.active);
+  if (year) rows = rows.filter(b => new Date(b.createdAt).getFullYear() === parseInt(year, 10));
+  if (month) {
+    const mIdx = AUDIT_MONTHS_LOWER.indexOf(month.toLowerCase());
+    if (mIdx >= 0) rows = rows.filter(b => new Date(b.createdAt).getMonth() === mIdx);
+  }
+  rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const perPage = Math.min(200, Math.max(10, parseInt(String(req.query.perPage ?? "25"), 10)));
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  const page = Math.min(Math.max(1, parseInt(String(req.query.page ?? "1"), 10)), pages);
+  res.json({ items: rows.slice((page - 1) * perPage, page * perPage), total, page, pages, perPage });
+});
+
+app.post("/api/ip-bans", (req: Request, res: Response) => {
+  const action = String(req.query.action ?? "");
+  if (action.startsWith("bulk-")) {
+    const ids = (req.body as { ids?: string[] }).ids ?? [];
+    let bans = readIpBans();
+    let affected = 0;
+    if (action === "bulk-unban") {
+      bans = bans.map(b => ids.includes(b.id) && b.active ? (affected++, { ...b, active: false, unbannedAt: new Date().toISOString(), unbannedBy: "admin" }) : b);
+    } else if (action === "bulk-whitelist") {
+      bans = bans.map(b => ids.includes(b.id) ? (affected++, { ...b, whitelisted: true, active: true }) : b);
+    } else if (action === "bulk-unwhitelist") {
+      bans = bans.map(b => ids.includes(b.id) && b.whitelisted ? (affected++, { ...b, whitelisted: false }) : b);
+    }
+    writeIpBans(bans);
+    res.json({ success: true, affected });
+    return;
+  }
+  // Create
+  const { ipAddress, reason, email } = req.body as { ipAddress?: string; reason?: string; email?: string };
+  if (!ipAddress) { res.status(400).json({ success: false, message: "IP address is required" }); return; }
+  const ban: IpBanMock = {
+    id: generateId(), ipAddress, cidr: mockSubnet(ipAddress), reason: reason || "Manual ban by admin",
+    email: email || "", source: "admin-manual", failedAttempts: 0, active: true, whitelisted: false,
+    createdAt: new Date().toISOString(),
+  };
+  writeIpBans([...readIpBans(), ban]);
+  res.status(201).json({ success: true, ban });
+});
+
+app.put("/api/ip-bans", (req: Request, res: Response) => {
+  const id = String(req.query.id ?? "");
+  const { whitelisted } = req.body as { whitelisted?: boolean };
+  writeIpBans(readIpBans().map(b => b.id === id ? { ...b, whitelisted: !!whitelisted, active: !!whitelisted || b.active } : b));
+  res.json({ success: true });
+});
+
+app.delete("/api/ip-bans", (req: Request, res: Response) => {
+  const id = String(req.query.id ?? "");
+  writeIpBans(readIpBans().map(b => b.id === id ? { ...b, active: false, unbannedAt: new Date().toISOString(), unbannedBy: "admin" } : b));
+  res.json({ success: true });
+});
+
+// ─── EMAIL CONFIG (mock mirror of backend/api/email-config.php) ─────────────────
+const EMAIL_TEMPLATE_KEYS = ["login_notification", "failed_login_alert", "donor_receipt", "password_reset", "new_ip_ban", "ip_unbanned"];
+
+app.get("/api/email-config", (req: Request, res: Response) => {
+  if (req.query.action === "templates") {
+    res.json({
+      templates: EMAIL_TEMPLATE_KEYS.map(key => ({
+        key,
+        subject: `[${key}] subject`,
+        body: `<p>Edit the <b>${key}</b> template body here. Tokens like {{donor_name}} are replaced when the email is sent.</p>`,
+      })),
+      branding: { siteName: "Daily Impact Devotional", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" },
+    });
+    return;
+  }
+  const s = readJson<Record<string, string>>(SETTINGS_FILE, {});
+  res.json({
+    mailMethod: s.mail_method ?? "resend",
+    resend: { apiKey: s.resend_api_key ? s.resend_api_key.slice(0, 8) + "..." : "", fromEmail: s.resend_from_email ?? "", fromName: s.resend_from_name ?? "Daily Impact Devotional", replyTo: s.resend_reply_to ?? "", enabled: (s.resend_enabled ?? "true") === "true" },
+    smtp: { host: s.smtp_host ?? "", user: s.smtp_user ?? "", pass: s.smtp_pass ? "********" : "", port: s.smtp_port ?? "587", secure: s.smtp_secure ?? "tls", enabled: (s.smtp_enabled ?? "false") === "true" },
+    donation: { fromName: s.donation_from_name ?? "", fromEmail: s.donation_from_email ?? "" },
+    notifyEmails: s.security_notify_emails ?? "",
+  });
+});
+
+app.put("/api/email-config", (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>;
+  const s = readJson<Record<string, string>>(SETTINGS_FILE, {});
+  if (req.query.action === "templates") {
+    // Templates are stored under email_template_<key>_subject/_body.
+    const templates = (body.templates as { key: string; subject?: string; body?: string }[]) ?? [];
+    for (const t of templates) {
+      if (t.subject) s[`email_template_${t.key}_subject`] = t.subject;
+      if (t.body) s[`email_template_${t.key}_body`] = t.body;
+    }
+    const b = (body.branding as Record<string, string>) ?? {};
+    if (b.siteName) s.site_name = b.siteName;
+    if (b.siteLogoUrl) s.site_logo_url = b.siteLogoUrl;
+    for (const [k, v] of Object.entries({ socialFacebook: "social_facebook", socialTwitter: "social_twitter", socialInstagram: "social_instagram", socialYoutube: "social_youtube" })) {
+      if ((b as Record<string, string>)[k] !== undefined) s[v] = (b as Record<string, string>)[k];
+    }
+    writeJson(SETTINGS_FILE, s);
+    res.json({ success: true });
+    return;
+  }
+  const mailMethod = body.mailMethod;
+  if (typeof mailMethod === "string" && mailMethod) s.mail_method = mailMethod;
+  const resend = body.resend as Record<string, unknown> | undefined;
+  if (resend) {
+    if (typeof resend.apiKey === "string" && !resend.apiKey.includes("...")) s.resend_api_key = resend.apiKey;
+    if (resend.fromEmail) s.resend_from_email = String(resend.fromEmail);
+    if (resend.fromName) s.resend_from_name = String(resend.fromName);
+    if (resend.replyTo) s.resend_reply_to = String(resend.replyTo);
+    if (resend.enabled !== undefined) s.resend_enabled = resend.enabled ? "true" : "false";
+  }
+  const smtp = body.smtp as Record<string, unknown> | undefined;
+  if (smtp) {
+    if (smtp.host) s.smtp_host = String(smtp.host);
+    if (smtp.user) s.smtp_user = String(smtp.user);
+    if (typeof smtp.pass === "string" && smtp.pass !== "********") s.smtp_pass = smtp.pass;
+    if (smtp.port) s.smtp_port = String(smtp.port);
+    if (smtp.secure) s.smtp_secure = String(smtp.secure);
+    if (smtp.enabled !== undefined) s.smtp_enabled = smtp.enabled ? "true" : "false";
+  }
+  const donation = body.donation as Record<string, unknown> | undefined;
+  if (donation) {
+    if (donation.fromName) s.donation_from_name = String(donation.fromName);
+    if (donation.fromEmail) s.donation_from_email = String(donation.fromEmail);
+  }
+  if (body.notifyEmails) s.security_notify_emails = String(body.notifyEmails);
+  writeJson(SETTINGS_FILE, s);
+  res.json({ success: true });
+});
+
+app.post("/api/email-config", (req: Request, res: Response) => {
+  const { email } = req.body as { email?: string };
+  if (!email) { res.status(400).json({ success: false, error: "Valid email address is required" }); return; }
+  console.log(`[Email] Test email queued → ${email} (mock: no real send in dev)`);
+  res.json({ success: true, message: "Test email sent via MOCK (dev). Configure Resend/SMTP keys in Settings → Email to send for real.", method: "mock" });
 });
 
 // ─── EMAIL NOTIFICATION HELPER ───────────────────────────────────────────────────
@@ -947,16 +1518,23 @@ function buildPhotoCaption(dev: DevotionalRecord): string {
 //   footer
 // All section labels are bold, matching the homepage's bold section headings.
 // Stays within Telegram's 4096-char sendMessage limit.
-function buildDevotionalBody(dev: DevotionalRecord, footerText: string): string {
+// When includeHeader is FALSE the Date + Title block is omitted so the message
+// starts at the Scripture section — used when the devotional photo (whose
+// caption already carries the date + title) was posted first, so the date and
+// title are never duplicated across the two messages.
+function buildDevotionalBody(dev: DevotionalRecord, footerText: string, includeHeader = true): string {
   const MAX = 4096;
   const reserve = footerText.length + 40; // footer + separator + slack
   const budget = MAX - reserve;
   const sections: string[] = [];
 
-  // Date + Title (header block — same as homepage)
-  const dateStr = `${dev.date.trim()}, ${dev.year}`;
-  if (dateStr !== ", 0") sections.push(`<b>${tgEscape(dateStr)}</b>`);
-  if (dev.title) sections.push(`<b>${tgEscape(dev.title)}</b>`);
+  // Date + Title (header block — same as homepage). Skipped when the header
+  // was already posted with the devotional photo's caption.
+  if (includeHeader) {
+    const dateStr = `${dev.date.trim()}, ${dev.year}`;
+    if (dateStr !== ", 0") sections.push(`<b>${tgEscape(dateStr)}</b>`);
+    if (dev.title) sections.push(`<b>${tgEscape(dev.title)}</b>`);
+  }
 
   // Scripture
   if (dev.scriptureRef) sections.push(`<b>Scripture:</b> <i>${tgEscape(dev.scriptureRef)}</i>`);
@@ -1038,11 +1616,11 @@ async function sendToTelegram(
   footerText: string
 ): Promise<{ success: boolean; messageId?: number; error?: string }> {
   const photoCaption = buildPhotoCaption(dev);
-  const bodyText = buildDevotionalBody(dev, footerText);
   const imageUrl = resolveImageUrl(dev);
 
   let lastMessageId: number | undefined;
   let lastError: string | undefined;
+  let photoPosted = false;
 
   // --- STEP 1: photo + (title, date) -------------------------------------
   try {
@@ -1060,6 +1638,7 @@ async function sendToTelegram(
     const json = await res.json() as { ok: boolean; result?: { message_id: number }; description?: string };
     if (json.ok) {
       lastMessageId = json.result?.message_id;
+      photoPosted = true;
     } else {
       // Photo failed (usually because the image URL isn't publicly reachable).
       // Don't abort — we still want to deliver the devotional text below.
@@ -1071,7 +1650,9 @@ async function sendToTelegram(
     lastError = String(e);
   }
 
-  // --- STEP 2: full devotional body -------------------------------------
+  // --- STEP 2: full devotional body (starts at the Scripture section; the
+  // date + title header is only re-added if the photo failed to post) ------
+  const bodyText = buildDevotionalBody(dev, footerText, photoPosted);
   try {
     const textRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
@@ -1194,6 +1775,21 @@ app.post("/api/telegram/unschedule", (req: Request, res: Response) => {
   const removed = before - log.length;
   writeJson(TELEGRAM_LOG_FILE, log);
   res.json({ success: true, removed });
+});
+
+// POST re-schedule an already-SENT broadcast at a new time (posts again)
+app.post("/api/telegram/reschedule", (req: Request, res: Response) => {
+  const { id, postTime } = req.body as { id?: string; postTime?: string };
+  if (!id || !/^([01]\d|2[0-3]):[0-5]\d$/.test(postTime || "")) {
+    res.status(400).json({ success: false, error: "id and a valid HH:MM postTime are required" });
+    return;
+  }
+  let log = readJson<TelegramLogEntry[]>(TELEGRAM_LOG_FILE, []);
+  let found = false;
+  log = log.map(e => e.id === id ? (found = true, { ...e, postTime, status: "scheduled", sentAt: undefined, error: undefined }) : e);
+  if (!found) { res.status(404).json({ success: false, error: "Broadcast not found" }); return; }
+  writeJson(TELEGRAM_LOG_FILE, log);
+  res.json({ success: true, message: `Re-scheduled for ${postTime}` });
 });
 
 // POST send a devotional to Telegram RIGHT NOW (manual trigger from dashboard)

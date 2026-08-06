@@ -163,6 +163,10 @@ if ($method === 'POST') {
 }
 
 if ($method === 'GET') {
+    // Report endpoints are admin-only and gated by role permissions (the
+    // visit/heartbeat/leave POST actions above stay public for tracking).
+    requireSection('analytics');
+
     if ($action === 'ranges') {
         // Months + years that actually have data, for the filter dropdowns.
         $stmt = $pdo->query(

@@ -33,6 +33,15 @@ function ensureAdminUserColumns(): void {
         if (strtolower((string)$stmt->fetchColumn()) === 'enum') {
             $pdo->exec("ALTER TABLE admin_users MODIFY role VARCHAR(50) NOT NULL DEFAULT 'admin'");
         }
+        // Staff profile bio — each logged-in user's OWN bio, never the author's.
+        $bioStmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'admin_users' AND COLUMN_NAME = 'bio'"
+        );
+        $bioStmt->execute([$db]);
+        if ((int)$bioStmt->fetchColumn() === 0) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN bio TEXT NULL AFTER email");
+        }
     } catch (Throwable $e) {
         // Table may not exist yet — install.php handles fresh setups.
     }
@@ -46,6 +55,122 @@ function mapUserRole(string $role): string {
     if ($r === 'editor') return 'Assistant Editor';
     if ($r === 'guest') return 'Guest Writer';
     return $role;
+}
+
+// ─── Login security email notifications (branded templates) ─────────────────
+// Sent to the security_notify_emails list. The login notification carries a
+// one-time "log out all sessions" button (secureall token) + a reset link, so
+// the real admin can instantly revoke a suspicious login from their inbox.
+
+/** Best-effort geo lookup + browser parse for notification detail rows. */
+function adminLoginContext(string $ip, string $ua): array
+{
+    $location = 'Unknown';
+    if ($ip && $ip !== 'unknown' && $ip !== '::1' && !str_starts_with($ip, '127.') && !str_starts_with($ip, '192.168.')) {
+        try {
+            $geoUrl = "http://ip-api.com/json/{$ip}?fields=city,regionName,country";
+            $geoRes = @file_get_contents($geoUrl, false, stream_context_create(['http' => ['timeout' => 3]]));
+            if ($geoRes) {
+                $geo = json_decode($geoRes, true);
+                if ($geo && isset($geo['city'])) {
+                    $location = implode(', ', array_filter([$geo['city'], $geo['regionName'] ?? '', $geo['country'] ?? '']));
+                }
+            }
+        } catch (Throwable $e) { /* non-fatal */ }
+    } else {
+        $location = 'Localhost / Local network';
+    }
+
+    $browser = 'Unknown';
+    if (preg_match('/(Chrome|Firefox|Safari|Edge|Opera)[\/\s]([\d.]+)/', $ua, $bm)) {
+        $browser = $bm[0];
+    }
+    return ['location' => $location, 'browser' => $browser];
+}
+
+function adminTimezoneNow(): string
+{
+    $tz = getSetting('admin_timezone', 'Africa/Lagos');
+    try {
+        return (new DateTime('now', new DateTimeZone($tz)))->format('F j, Y g:i A') . ' (' . $tz . ')';
+    } catch (Throwable $e) {
+        return date('F j, Y g:i A') . ' (WAT)';
+    }
+}
+
+/** Branded "new admin login" notification with the log-out-all + reset buttons. */
+function notifyAdminLogin(string $email, string $ip, string $ua): void
+{
+    $notifyEmails = getSetting('security_notify_emails', '');
+    if ($notifyEmails === '') return;
+
+    $ctx = adminLoginContext($ip, $ua);
+    $secureToken = bin2hex(random_bytes(24));
+    setSetting('secureall_token_hash', hash('sha256', $secureToken));
+    setSetting('secureall_token_expires', (string)(time() + 86400)); // 24h
+    $origin = siteAbsoluteUrl('');
+
+    $rendered = renderEmailTemplate('login_notification', [
+        'login_email'    => $email,
+        'login_ip'       => $ip,
+        'login_time'     => adminTimezoneNow(),
+        'login_location' => $ctx['location'],
+        'login_browser'  => $ctx['browser'],
+        'secureall_url'  => $origin . 'admin/login?secureall=' . $secureToken,
+        'reset_url'      => $origin . 'admin/login',
+    ]);
+
+    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
+        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
+            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
+        }
+    }
+}
+
+/** Branded failed-login alert, throttled to one per email+IP per 30 minutes. */
+function notifyFailedLoginAttempt(string $email, string $ip, int $attemptsRemaining): void
+{
+    $notifyEmails = getSetting('security_notify_emails', '');
+    if ($notifyEmails === '') return;
+
+    // Shared throttle: one alert per email+IP per 30 minutes.
+    $h = substr(hash('sha256', strtolower($email) . '|' . $ip), 0, 24);
+    if (!alertNotThrottled('failed_alert_log', $h, 1800)) {
+        return; // already alerted recently
+    }
+
+    $ctx = adminLoginContext($ip, $_SERVER['HTTP_USER_AGENT'] ?? '');
+    $rendered = renderEmailTemplate('failed_login_alert', [
+        'login_email'        => $email,
+        'login_ip'           => $ip,
+        'login_time'         => adminTimezoneNow(),
+        'login_location'     => $ctx['location'],
+        'login_browser'      => $ctx['browser'],
+        'attempts_remaining' => (string)max(0, $attemptsRemaining),
+    ]);
+
+    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
+        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
+            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
+        }
+    }
+}
+
+/** Branded "new IP ban" notification (template new_ip_ban). */
+function notifyIpBan(string $ip, string $cidr, string $reason): void
+{
+    $notifyEmails = getSetting('security_notify_emails', '');
+    if ($notifyEmails === '') return;
+    $rendered = renderEmailTemplate('new_ip_ban', [
+        'ban_ip'     => $ip,
+        'ban_cidr'   => $cidr,
+        'ban_reason' => $reason,
+    ]);
+    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
+        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
+            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
+        }
+    }
 }
 
 // Use secure session with timeout (60 min idle) and IP/UA binding
@@ -71,6 +196,9 @@ switch ($method) {
     case 'POST':
         if ($action === 'login') {
             // POST /api/admin?action=login
+            ensureLoginLogTable();
+            ensureTwoFaColumns(); // 2FA columns must exist before the auth SELECT below
+            ensureSessionVersionColumn(); // powers "log out all sessions" from the login-notification email
             $input = jsonInput();
             $email    = trim($input['email'] ?? '');
             $password = $input['password'] ?? '';
@@ -142,26 +270,39 @@ switch ($method) {
                     $lockoutThreshold = (int)getSetting('security_lockout_threshold', '3');
 
                     if ($recentFailures >= $lockoutThreshold) {
-                        recordIpBan(
+                        $ban = recordIpBan(
                             $ip,
                             "Automatic ban after {$lockoutThreshold} failed login attempts",
                             $email,
                             $recentFailures,
                             'admin-login'
                         );
-                        jsonResponse([
-                            'success' => false,
-                            'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
-                            'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
-                            'banned'  => true,
-                            'attemptsRemaining' => 0,
-                        ], 403);
+                        // Whitelisted IPs are never banned — recordIpBan returns
+                        // null, so fall through to the normal countdown response
+                        // instead of a false "you are banned" message.
+                        if ($ban !== null) {
+                            try {
+                                notifyIpBan($ip, $ban['cidr'], "Automatic ban after {$lockoutThreshold} failed login attempts");
+                            } catch (Throwable $e) { /* non-fatal */ }
+                            jsonResponse([
+                                'success' => false,
+                                'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                                'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                                'banned'  => true,
+                                'attemptsRemaining' => 0,
+                            ], 403);
+                        }
                     }
 
                     // Countdown warning: "2 attempts remaining → 1 → banned".
                     // recentFailures already includes this failure, so remaining =
                     // threshold - failures (clamped at 0).
                     $attemptsRemaining = max(0, $lockoutThreshold - $recentFailures);
+
+                    // Alert the admins (throttled) — the failed-attempt email.
+                    try {
+                        notifyFailedLoginAttempt($email, $ip, $attemptsRemaining);
+                    } catch (Throwable $e) { /* non-fatal */ }
                     jsonResponse([
                         'success' => false,
                         'message' => 'No account found with this email address. Please check and try again.',
@@ -226,36 +367,25 @@ switch ($method) {
             // step match the email step exactly — two countdown warnings, then
             // the third failed attempt triggers the permanent ban.
             if (($recentFailures + 1) >= $lockoutThreshold || ($emailFailures + 1) >= $lockoutThreshold) {
-                // Ban the entire IP subnet
+                // Ban the entire IP subnet (refused for whitelisted IPs).
                 $ban = recordIpBan($ip, "Automatic ban after {$lockoutThreshold} failed login attempts", $email, $recentFailures + 1, 'admin-login');
-                
-                // Notify admins about the ban
-                $notifyEmails = getSetting('security_notify_emails', '');
-                if ($notifyEmails) {
-                    $emails = array_map('trim', explode(',', $notifyEmails));
-                    foreach ($emails as $notifyEmail) {
-                        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
-                            $subject = "🚨 Automatic IP Ban — Daily Impact Devotional";
-                            $body = "An IP subnet has been automatically banned due to repeated failed login attempts.\n\n"
-                                  . "IP Address: {$ip}\n"
-                                  . "CIDR: {$ban['cidr']}\n"
-                                  . "Email attempted: {$email}\n"
-                                  . "Failed attempts: {$recentFailures}\n"
-                                  . "Ban reason: Automatic ban after {$lockoutThreshold} failed attempts\n"
-                                  . "Time: " . date('Y-m-d H:i:s') . "\n\n"
-                                  . "This ban affects the entire IP subnet. Review in admin dashboard if this is a false positive.";
-                            queueMail($notifyEmail, $subject, $body);
-                        }
-                    }
-                }
 
-                jsonResponse([
-                    'success' => false,
-                    'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
-                    'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
-                    'banned'  => true,
-                    'attemptsRemaining' => 0,
-                ], 403);
+                if ($ban !== null) {
+                    // Notify admins about the ban (branded template)
+                    try {
+                        notifyIpBan($ip, $ban['cidr'], "Automatic ban after {$lockoutThreshold} failed login attempts");
+                    } catch (Throwable $e) { /* non-fatal */ }
+
+                    jsonResponse([
+                        'success' => false,
+                        'message' => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                        'error'   => "You have been banned for too many failed login attempts. Please contact the administrator.",
+                        'banned'  => true,
+                        'attemptsRemaining' => 0,
+                    ], 403);
+                }
+                // Whitelisted — recordIpBan refused; fall through to the generic
+                // failure response below so the countdown keeps working.
             }
 
             // ─── Authentication ───────────────────────────────────────────────
@@ -299,6 +429,11 @@ switch ($method) {
                     'Unknown',
                 ]);
 
+                // Alert the admins (throttled) — the failed-attempt email.
+                try {
+                    notifyFailedLoginAttempt($email, $ip, max(0, $lockoutThreshold - max($recentFailures, $emailFailures) - 1));
+                } catch (Throwable $e) { /* non-fatal */ }
+
                 // Prevent email enumeration — use same message regardless.
                 // Countdown warning mirrors the email step: the server bans when
                 // failures reach the threshold, and the client shows 2 → 1 → banned.
@@ -311,7 +446,7 @@ switch ($method) {
                 ], 401);
             }
 
-            // ─── Successful Login — Regenerate & Bind ─────────────────────────
+            // ─── Successful Password — 2FA Gate & Session ─────────────────────
 
             // Enforce the account status set in User Management. Placed AFTER
             // password verification so account status is never revealed without
@@ -323,27 +458,34 @@ switch ($method) {
                 );
             }
 
-            // Regenerate session ID to prevent session fixation
-            regenerateSession();
+            // ── Two-Factor Authentication gate ──────────────────────────────
+            // When the account has 2FA enabled, do NOT complete the login yet.
+            // Store a pending session + one-time token; the frontend then shows
+            // the 2FA modal and calls /api/2fa?action=verify to finish login
+            // with a live app/email/backup code.
+            ensureTwoFaColumns();
+            $twofa = twofaStatusForUser($admin);
+            if ($twofa['enabled']) {
+                // Regenerate before storing the pending token so a fixation
+                // attempt can't ride the pre-auth session id.
+                regenerateSession();
+                $pendingToken = bin2hex(random_bytes(16));
+                $_SESSION['pending_2fa'] = [
+                    'user_id' => (int)$admin['id'],
+                    'token'   => $pendingToken,
+                ];
+                $_SESSION['2fa_attempts'] = 0;
+                jsonResponse([
+                    'success'       => true,
+                    'twofaRequired' => true,
+                    'pendingToken'  => $pendingToken,
+                    'twofa'         => $twofa,
+                ]);
+            }
 
-            // Clear any lockout for this IP
-            $lockKey = 'login_lock_' . preg_replace('/[^a-f0-9]/', '', hash('sha256', $ip));
-            setSetting($lockKey, '0');
-
-            // Bind session to this client. MUST use the exact same fingerprint
-            // that validateSessionBinding() computes (IP subnet + UA) — a
-            // mismatch here silently destroys the session on the next request,
-            // logging the admin out of every operation ("login first" errors).
-            $fingerprint = sessionFingerprint();
-
-            // Set session data
-            $_SESSION['admin_id']            = $admin['id'];
-            $_SESSION['admin_email']         = $admin['email'];
-            $_SESSION['admin_name']          = $admin['name'];
-            $_SESSION['admin_role']          = $admin['role'];
-            $_SESSION['session_fingerprint'] = $fingerprint;
-            $_SESSION['last_activity']       = time();
-            $_SESSION['created_at']          = time();
+            // No 2FA — complete the login immediately (shared with the 2FA
+            // verify path so both establish an identical session).
+            establishAdminSession($admin);
 
             // Log successful login
             $logStmt = $pdo->prepare(
@@ -358,7 +500,12 @@ switch ($method) {
             ]);
 
             // Real-time activity feed entry — shows on the dashboard instantly.
-            logActivity('login', "Admin user {$admin['name']} successfully logged into Publisher Portal.", 'admin', $admin['id'], $admin['name']);
+            logActivity('login', "Admin user {$admin['name']} successfully logged into Publisher Portal.", 'admin', (string)$admin['id'], $admin['name']);
+
+            // Branded login-notification email with "log out all sessions" + reset links.
+            try {
+                notifyAdminLogin($admin['email'], $ip, $ua);
+            } catch (Throwable $e) { /* non-fatal */ }
 
             jsonResponse([
                 'success' => true,
@@ -372,13 +519,16 @@ switch ($method) {
         } elseif ($action === 'update-profile') {
             // POST /api/admin?action=update-profile
             // Update the logged-in admin's name/email in admin_users AND session,
-            // plus the author_name setting used as the default devotional author.
+            // Staff details are deliberately NOT written to the author_name
+            // setting — the public author identity comes only from Branding.
             if (!secureSession(3600)) {
                 jsonError('Unauthorized. Please log in first.', 401);
             }
             $input = jsonInput();
             $name  = trim((string)($input['name'] ?? ''));
             $email = strtolower(trim((string)($input['email'] ?? '')));
+            // Staff bio belongs to THIS user — it is NOT the public author bio.
+            $bio   = trim((string)($input['bio'] ?? ''));
 
             if ($name === '') {
                 jsonError('Name is required.', 400);
@@ -394,25 +544,23 @@ switch ($method) {
                 jsonError('That email is already in use by another admin account.', 409);
             }
 
-            $stmt = $pdo->prepare("UPDATE admin_users SET name = ?, email = ? WHERE id = ?");
-            $stmt->execute([$name, $email, $_SESSION['admin_id']]);
+            ensureAdminUserColumns();
+            $stmt = $pdo->prepare("UPDATE admin_users SET name = ?, email = ?, bio = ? WHERE id = ?");
+            $stmt->execute([$name, $email, $bio, $_SESSION['admin_id']]);
 
-            // Update session so subsequent checks return the new name
+            // Update session so subsequent checks return the new details.
+            // NOTE: this NEVER touches the author_name setting — the public
+            // author identity (About the Author page + default devotional
+            // author) is set ONLY from the Settings → Branding tab.
             $_SESSION['admin_name']  = $name;
             $_SESSION['admin_email'] = $email;
-
-            // Persist as the default author name for new devotionals
-            try {
-                setSetting('author_name', $name);
-            } catch (Exception $e) {
-                // Ignore — setting is a convenience default only
-            }
+            $_SESSION['admin_bio']   = $bio;
 
             logActivity('profile_update', "Profile updated for {$name}.", 'admin', $_SESSION['admin_id'] ?? '', $name);
 
             jsonResponse([
                 'success' => true,
-                'user'    => ['name' => $name, 'email' => $email],
+                'user'    => ['name' => $name, 'email' => $email, 'bio' => $bio],
             ]);
 
         } elseif ($action === 'logout') {
@@ -433,6 +581,47 @@ switch ($method) {
             setSetting($lockKey, '0');
 
             jsonResponse(['success' => true]);
+
+        } elseif ($action === 'logout-all-sessions') {
+            // POST /api/admin?action=logout-all-sessions { token }
+            // Used by the "This wasn't me — Log out all sessions" button in the
+            // login-notification email. The token is single-use and expires after
+            // 24h; bumping session_version invalidates every admin session.
+            $input = jsonInput();
+            $token = trim((string)($input['token'] ?? ($_GET['token'] ?? '')));
+            $stored = (string)getSetting('secureall_token_hash', '');
+            $expires = (int)getSetting('secureall_token_expires', '0');
+            if ($stored === '' || !hash_equals($stored, hash('sha256', $token))) {
+                jsonError('Invalid or expired security token. Request a new login notification email.', 403);
+            }
+            if ($expires > 0 && time() > $expires) {
+                jsonError('This security link has expired. Request a new login notification email.', 403);
+            }
+
+            // Invalidate the token immediately (single-use).
+            setSetting('secureall_token_hash', '');
+            setSetting('secureall_token_expires', '0');
+
+            // Bump every admin's session_version — all existing sessions die on
+            // their next API call (including the session that triggered the email).
+            ensureSessionVersionColumn();
+            try {
+                $pdo->exec("UPDATE admin_users SET session_version = session_version + 1");
+            } catch (Throwable $e) {
+                jsonError('Failed to revoke sessions: ' . $e->getMessage(), 500);
+            }
+
+            // Also destroy any active session on this request.
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                $_SESSION = [];
+                session_destroy();
+            }
+
+            logActivity('security', 'All admin sessions were logged out from the login-notification email.');
+            jsonResponse([
+                'success' => true,
+                'message' => 'All admin sessions have been logged out. Anyone using this account must sign in again.',
+            ]);
 
         } elseif ($action === 'forgot-password') {
             // POST /api/admin?action=forgot-password
@@ -472,14 +661,21 @@ switch ($method) {
             $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
             $resetUrl = "{$scheme}://{$host}/admin/login?reset={$token}";
 
-            $subject = "🔑 Password Reset — Daily Impact Devotional";
-            $body = "A password reset was requested for your account.\n\n"
-                  . "Click the link below to set a new password (valid for 30 minutes):\n\n"
-                  . $resetUrl . "\n\n"
-                  . "If you did not request this, you can safely ignore this email.\n"
-                  . "— Daily Impact Devotional";
-
-            queueMail($email, $subject, $body);
+            // Branded, responsive password-reset email (editable template).
+            try {
+                $rendered = renderEmailTemplate('password_reset', [
+                    'reset_url' => $resetUrl,
+                ]);
+                queueMailHtml($email, $rendered['subject'], $rendered['text'], $rendered['html']);
+            } catch (Throwable $e) {
+                // Fall back to a plain-text reset email if the engine fails.
+                $subject = "🔑 Password Reset — " . getSetting('site_name', 'Daily Impact Devotional');
+                $body = "A password reset was requested for your account.\n\n"
+                      . "Click the link below to set a new password (valid for 30 minutes):\n\n"
+                      . $resetUrl . "\n\n"
+                      . "If you did not request this, you can safely ignore this email.\n";
+                queueMail($email, $subject, $body);
+            }
 
             jsonResponse([
                 'success' => true,
@@ -534,12 +730,12 @@ switch ($method) {
             // POST /api/admin?action=list-users
             // Returns every admin/staff account so the User Management tab can
             // show the real database state (previously the dashboard only ever
-            // displayed the current session admin and dropped everything else).
-            requireAdmin();
+            // displayed the current session admin and dropped everything else).            requireSection('user-management');
             ensureAdminUserColumns();
+            ensureTwoFaColumns(); // 2FA columns must exist for the SELECT + per-user status below
 
             $stmt = $pdo->query(
-                "SELECT id, name, email, role, status, created_at FROM admin_users ORDER BY created_at DESC, id DESC"
+                "SELECT id, name, email, role, status, created_at, totp_enabled, email_otp_enabled, backup_codes FROM admin_users ORDER BY created_at DESC, id DESC"
             );
             $rows = $stmt->fetchAll();
             $users = [];
@@ -552,6 +748,7 @@ switch ($method) {
                     'role'      => mapUserRole((string)($r['role'] ?? 'editor')),
                     'status'    => (string)($r['status'] ?? 'Active'),
                     'createdAt' => (string)($r['created_at'] ?? ''),
+                    'twofa'     => twofaStatusForUser($r),
                 ];
                 $seenEmails[] = strtolower(trim((string)$r['email']));
             }
@@ -568,6 +765,7 @@ switch ($method) {
                     'role'      => mapUserRole((string)($_SESSION['admin_role'] ?? 'admin')),
                     'status'    => 'Active',
                     'createdAt' => '',
+                    'twofa'     => ['enabled' => false, 'methods' => [], 'backupRemaining' => 0],
                 ]);
             }
             jsonResponse(['success' => true, 'users' => $users]);
@@ -576,7 +774,7 @@ switch ($method) {
             // POST /api/admin?action=save-user
             // Create a new staff user (with password) or update an existing one.
             // Passwords are hashed; an empty password on edit keeps the current one.
-            requireAdmin();
+            requireSection('user-management');
             ensureAdminUserColumns();
 
             $input = jsonInput();
@@ -645,7 +843,7 @@ switch ($method) {
 
         } elseif ($action === 'delete-user') {
             // POST /api/admin?action=delete-user
-            requireAdmin();
+            requireSection('user-management');
             $input = jsonInput();
             $id = isset($input['id']) ? (int)$input['id'] : 0;
             if ($id <= 0) jsonError('User id is required.', 400);
@@ -673,12 +871,12 @@ switch ($method) {
             // (loadUsers in Dashboard.tsx). Previously the handler only existed
             // under POST, so GET returned "Invalid action" and the tab always
             // showed zero users — and "create" appeared to do nothing because
-            // the freshly saved row was never re-listed.
-            requireAdmin();
+            // the freshly saved row was never re-listed.            requireSection('user-management');
             ensureAdminUserColumns();
+            ensureTwoFaColumns(); // 2FA columns must exist for the SELECT + per-user status below
 
             $stmt = $pdo->query(
-                "SELECT id, name, email, role, status, created_at FROM admin_users ORDER BY created_at DESC, id DESC"
+                "SELECT id, name, email, role, status, created_at, totp_enabled, email_otp_enabled, backup_codes FROM admin_users ORDER BY created_at DESC, id DESC"
             );
             $rows = $stmt->fetchAll();
             $users = [];
@@ -691,6 +889,7 @@ switch ($method) {
                     'role'      => mapUserRole((string)($r['role'] ?? 'editor')),
                     'status'    => (string)($r['status'] ?? 'Active'),
                     'createdAt' => (string)($r['created_at'] ?? ''),
+                    'twofa'     => twofaStatusForUser($r),
                 ];
                 $seenEmails[] = strtolower(trim((string)$r['email']));
             }
@@ -707,6 +906,7 @@ switch ($method) {
                     'role'      => mapUserRole((string)($_SESSION['admin_role'] ?? 'admin')),
                     'status'    => 'Active',
                     'createdAt' => '',
+                    'twofa'     => ['enabled' => false, 'methods' => [], 'backupRemaining' => 0],
                 ]);
             }
             jsonResponse(['success' => true, 'users' => $users]);
@@ -731,6 +931,7 @@ switch ($method) {
                 'user'     => $loggedIn ? [
                     'email' => $_SESSION['admin_email'] ?? '',
                     'name'  => $_SESSION['admin_name'] ?? '',
+                    'bio'   => $_SESSION['admin_bio'] ?? '',
                     'role'  => $_SESSION['admin_role'] ?? '',
                 ] : null,
             ]);

@@ -39,10 +39,14 @@ import {
   Webhook,
   PanelLeftClose,
   PanelLeftOpen,
-  Ruler,
-  BarChart3
+  BarChart3,
+  Copy,
+  ShieldOff,
+  AlertCircle,
+  Smartphone
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import OtpCodeInput from "./OtpCodeInput";
 import { Devotional } from "../types";
 import AddDevotional from "./AddDevotional";
 import ListDevotional from "./ListDevotional";
@@ -52,7 +56,10 @@ import DonationSettings from "./DonationSettings";
 import PaymentsDashboard from "./PaymentsDashboard";
 import AnalyticsDashboard from "./AnalyticsDashboard";
 import EmailAuditPanel from "./EmailAuditPanel";
+import EmailTemplatesPanel from "./EmailTemplatesPanel";
+import IpBanPanel from "./IpBanPanel";
 import IdleTimeoutModal from "./IdleTimeoutModal";
+import AnimatedHamburger from "./AnimatedHamburger";
 import { API_BASE } from "../config/api";
 import { apiDelete, apiPut } from "../lib/api";
 
@@ -76,6 +83,7 @@ interface AdminUser {
   role: "Administrator" | "Assistant Editor" | "Guest Writer";
   status: "Active" | "Suspended";
   createdAt: string;
+  twofa?: { enabled: boolean; methods?: string[]; backupRemaining?: number };
 }
 
 /**
@@ -193,6 +201,7 @@ export default function Dashboard({
   const [isDevotionalOpen, setIsDevotionalOpen] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dashThemeOpen, setDashThemeOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!dashThemeOpen) return;
@@ -203,6 +212,27 @@ export default function Dashboard({
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [dashThemeOpen]);
+
+  // Lock page scroll while the mobile drawer is open (and close on Escape).
+  // The dashboard scrolls inside <main> (overflow-y-auto), NOT the body, so
+  // both must be locked or the content can still scroll behind the drawer.
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const prevBody = document.body.style.overflow;
+    const scroller = document.querySelector<HTMLElement>("main");
+    const prevMain = scroller ? scroller.style.overflow : "";
+    document.body.style.overflow = "hidden";
+    if (scroller) scroller.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevBody;
+      if (scroller) scroller.style.overflow = prevMain;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [mobileMenuOpen]);
 
   // Notifications/Toasts
   const [toastMsg, setToastMsg] = useState("");
@@ -216,18 +246,19 @@ export default function Dashboard({
 
   // Admin users are source-of-truth from the database/session, not localStorage.
   const [users, setUsers] = useState<AdminUser[]>([]);
-  const [sessionUser, setSessionUser] = useState<{ email?: string; name?: string; role?: string } | null>(null);
-  const sessionUserRef = useRef<{ email?: string; name?: string; role?: string } | null>(null);
+  const [sessionUser, setSessionUser] = useState<{ email?: string; name?: string; bio?: string; role?: string } | null>(null);
+  const sessionUserRef = useRef<{ email?: string; name?: string; bio?: string; role?: string } | null>(null);
   useEffect(() => { sessionUserRef.current = sessionUser; }, [sessionUser]);
   useEffect(() => {
     // Keep the UI tied to the authenticated admin only.
     fetch(`${API_BASE}/admin.php?action=check`)
       .then((res) => res.ok ? res.json() : null)
-      .then((data: { loggedIn?: boolean; user?: { email?: string; name?: string; role?: string } } | null) => {
+      .then((data: { loggedIn?: boolean; user?: { email?: string; name?: string; bio?: string; role?: string } } | null) => {
         if (data?.loggedIn && data.user) {
           // Sync the sidebar/profile with the name the admin set during
           // installation (previously a hardcoded "Dr. Andy Osakwe" survived).
           setProfileName(data.user.name || "Admin");
+          setProfileBio(data.user.bio || "");
           setChangeEmail(data.user.email || "");
 
           // Greet the freshly-logged-in admin by name (auto-dismisses).
@@ -289,6 +320,242 @@ export default function Dashboard({
     return () => { cancelled = true; clearInterval(timer); };
   }, [activeTab]);
 
+  // ── Two-Factor Authentication (real, server-verified) ──────────────────────
+  const loadTwofaStatus = (silent = false) => {
+    if (!silent) setTwofaLoading(true);
+    fetch(`${API_BASE}/2fa.php?action=status`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { success?: boolean; twofa?: { enabled: boolean; methods: string[]; backupRemaining: number } } | null) => {
+        if (data?.success && data.twofa) {
+          setTwofaStatus({
+            enabled: !!data.twofa.enabled,
+            methods: Array.isArray(data.twofa.methods) ? data.twofa.methods : [],
+            backupRemaining: typeof data.twofa.backupRemaining === "number" ? data.twofa.backupRemaining : 0,
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => setTwofaLoading(false));
+  };
+
+  // Load 2FA status when the Settings → Security tab opens (and on mount).
+  useEffect(() => {
+    if (activeTab === "settings") loadTwofaStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // ── App (TOTP) setup: server mints + persists the secret, QR shown, then
+  //    the code from the authenticator app must be confirmed before enabling.
+  const handleStartAppSetup = async () => {
+    setShow2FAQr(true);
+    setSetupSecret("");
+    setSetupOtpauth("");
+    setAppConfirmCode("");
+    setAppConfirmStatus("idle");
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=setup-totp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || data.error || "Could not start 2FA setup.", "error");
+        setShow2FAQr(false);
+        return;
+      }
+      setSetupSecret(data.secret || "");
+      setSetupOtpauth(data.otpauth || "");
+    } catch {
+      showToast("Could not reach the server.", "error");
+      setShow2FAQr(false);
+    }
+  };
+
+  const handleConfirmAppSetup = async (code: string) => {
+    if (code.length !== 6 || appConfirmStatus === "verifying") return;
+    setAppConfirmStatus("verifying");
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=confirm-totp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setAppConfirmStatus("error");
+        showToast(data.message || data.error || "Invalid code.", "error");
+        setTimeout(() => { setAppConfirmCode(""); setAppConfirmStatus("idle"); }, 750);
+        return;
+      }
+      setAppConfirmStatus("success");
+      setBackupCodes(Array.isArray(data.backupCodes) ? data.backupCodes : []);
+      setShowBackupCodes(true);
+      setBackupCodesSaved(false);
+      loadTwofaStatus(true);
+    } catch {
+      setAppConfirmStatus("error");
+      showToast("Could not reach the server.", "error");
+      setTimeout(() => { setAppConfirmCode(""); setAppConfirmStatus("idle"); }, 750);
+    }
+  };
+
+  // ── Email OTP setup: the server emails a real code, verified before enabling.
+  const handleSendEmailOtp = async () => {
+    setEmailOtpSent(false);
+    setEmailOtpValue("");
+    setEmailOtpStatus("idle");
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=send-email-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || data.error || "Could not send the code.", "error");
+        return;
+      }
+      setEmailOtpSent(true);
+      showToast("Verification code sent to your email — check your inbox (and spam).", "success");
+    } catch {
+      showToast("Could not reach the server.", "error");
+    }
+  };
+
+  const handleConfirmEmailSetup = async (code: string) => {
+    if (code.length !== 6 || emailOtpStatus === "verifying") return;
+    setEmailOtpStatus("verifying");
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=confirm-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setEmailOtpStatus("error");
+        showToast(data.message || data.error || "Invalid code.", "error");
+        setTimeout(() => { setEmailOtpValue(""); setEmailOtpStatus("idle"); }, 750);
+        return;
+      }
+      setEmailOtpStatus("success");
+      setBackupCodes(Array.isArray(data.backupCodes) ? data.backupCodes : []);
+      setShowBackupCodes(true);
+      setBackupCodesSaved(false);
+      setEmailOtpSent(false);
+      loadTwofaStatus(true);
+    } catch {
+      setEmailOtpStatus("error");
+      showToast("Could not reach the server.", "error");
+      setTimeout(() => { setEmailOtpValue(""); setEmailOtpStatus("idle"); }, 750);
+    }
+  };
+
+  // ── Deactivation: requires the live code for the method being disabled. ──
+  const handleBeginDeactivate = (method: "app" | "email") => {
+    setDeactivateMethod(method);
+    setDeactivateCode("");
+    setDeactivateStatus("idle");
+    setDeactivateError("");
+    setDeactivateSentOtp(false);
+    if (method === "email") {
+      // Send a fresh OTP to verify against.
+      fetch(`${API_BASE}/2fa.php?action=send-email-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      })
+        .then((r) => r.json().catch(() => ({})))
+        .then((d: { success?: boolean; message?: string }) => {
+          if (d.success) {
+            setDeactivateSentOtp(true);
+            showToast("Verification code sent to your email.", "success");
+          } else {
+            showToast(d.message || "Could not send the code.", "error");
+          }
+        })
+        .catch(() => showToast("Could not reach the server.", "error"));
+    }
+  };
+
+  const handleConfirmDeactivate = async (code: string) => {
+    if (!deactivateMethod || code.length < 6 || deactivateStatus === "verifying") return;
+    setDeactivateStatus("verifying");
+    setDeactivateError("");
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=deactivate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: deactivateMethod, code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setDeactivateStatus("error");
+        setDeactivateError(data.message || data.error || "Invalid code.");
+        setTimeout(() => { setDeactivateCode(""); setDeactivateStatus("idle"); }, 750);
+        return;
+      }
+      setDeactivateMethod(null);
+      setDeactivateCode("");
+      setDeactivateStatus("idle");
+      loadTwofaStatus(true);
+      showToast("Two-factor authentication disabled.", "info");
+    } catch {
+      setDeactivateStatus("error");
+      setDeactivateError("Could not reach the server.");
+      setTimeout(() => { setDeactivateCode(""); setDeactivateStatus("idle"); }, 750);
+    }
+  };
+
+  // ── Regenerate backup codes (old set is replaced). ──
+  const handleRegenerateBackup = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=regenerate-backup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || data.error || "Could not regenerate backup codes.", "error");
+        return;
+      }
+      setBackupCodes(Array.isArray(data.backupCodes) ? data.backupCodes : []);
+      setShowBackupCodes(true);
+      setBackupCodesSaved(false);
+      loadTwofaStatus(true);
+      showToast("New backup codes generated — save them now.", "success");
+    } catch {
+      showToast("Could not reach the server.", "error");
+    }
+  };
+
+  // ── Administrator: reset 2FA for any staff user. ──
+  const handleAdminReset2fa = async (userId: string, userName: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/2fa.php?action=admin-reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || data.error || "Could not reset 2FA.", "error");
+        return;
+      }
+      setReset2faUserId(null);
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === userId ? { ...u, twofa: { enabled: false, methods: [], backupRemaining: 0 } } : u
+        )
+      );
+      showToast(`2FA has been reset for ${userName}.`, "success");
+    } catch {
+      showToast("Could not reach the server.", "error");
+    }
+  };
+
   // User Form states
   const [isUserFormOpen, setIsUserFormOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
@@ -314,6 +581,74 @@ export default function Dashboard({
   const [isTestingTelegram, setIsTestingTelegram] = useState(false);
   const [telegramConsoleLogs, setTelegramConsoleLogs] = useState<string[]>([]);
   const [dashboardSettings, setDashboardSettings] = useState<Record<string, string>>({});
+
+  // ─── Roles & Permissions ───────────────────────────────────────────────────
+  // The Administrator configures which dashboard sections each staff role can
+  // see in Settings → Roles & Permissions. The matrix is persisted server-side
+  // (settings key 'role_permissions') and enforced on the backend too.
+  const ROLE_SECTIONS: { key: string; label: string }[] = [
+    { key: "overview", label: "Overview Console" },
+    { key: "add-devotional", label: "Add Devotional" },
+    { key: "manage-devotionals", label: "List Devotionals" },
+    { key: "import-devotional", label: "Import Devotional" },
+    { key: "header-images", label: "Header Images" },
+    { key: "user-management", label: "User Management" },
+    { key: "telegram-integration", label: "Telegram Channel" },
+    { key: "foreword", label: "Foreword" },
+    { key: "payments", label: "Payments & Donations" },
+    { key: "analytics", label: "Website Analytics" },
+    { key: "settings", label: "Settings" },
+  ];
+  const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
+    Administrator: ROLE_SECTIONS.map((s) => s.key),
+    "Assistant Editor": ["overview", "add-devotional", "manage-devotionals", "import-devotional", "header-images", "foreword", "telegram-integration", "analytics"],
+    "Guest Writer": ["overview", "add-devotional", "manage-devotionals", "import-devotional"],
+  };
+  const normalizeRole = (r?: string | null): string => {
+    const low = (r || "").toLowerCase();
+    if (low === "admin") return "Administrator";
+    if (low === "editor") return "Assistant Editor";
+    if (low === "guest") return "Guest Writer";
+    return r || "Administrator";
+  };
+  const mergeRolePermissions = (saved: unknown): Record<string, string[]> => {
+    const out: Record<string, string[]> = {};
+    for (const [role, def] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+      if (role === "Administrator") {
+        out[role] = ROLE_SECTIONS.map((s) => s.key); // never restricted
+        continue;
+      }
+      const list = (saved as Record<string, unknown>)?.[role];
+      out[role] = Array.isArray(list)
+        ? (list as string[]).filter((k) => ROLE_SECTIONS.some((s) => s.key === k))
+        : [...def];
+    }
+    return out;
+  };
+  const [rolePermissions, setRolePermissions] = useState<Record<string, string[]>>(DEFAULT_ROLE_PERMISSIONS);
+  const [rolePermDraft, setRolePermDraft] = useState<Record<string, string[]> | null>(null);
+  const [rolePermSaving, setRolePermSaving] = useState(false);
+  const myRole = normalizeRole(sessionUser?.role);
+  const isAdministrator = myRole === "Administrator";
+  const canSee = useCallback(
+    (section: string): boolean => {
+      if (isAdministrator) return true;
+      const allowed = rolePermissions[myRole] || [];
+      return allowed.includes(section);
+    },
+    [isAdministrator, myRole, rolePermissions],
+  );
+  const currentPerms = rolePermDraft ?? rolePermissions;
+
+  // If the current role is denied the active tab (e.g. permissions changed,
+  // or a restricted role deep-links into a restricted section), fall back to
+  // the Overview console instead of rendering a locked tab.
+  useEffect(() => {
+    if (activeTab !== "overview" && !canSee(activeTab)) {
+      setActiveTab("overview");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, rolePermissions, sessionUser]);
 
   // One-time per-mount greeting banner (dismisses itself after a few seconds).
   const [welcomeMsg, setWelcomeMsg] = useState("");
@@ -370,7 +705,14 @@ export default function Dashboard({
     fetch(`${API_BASE}/settings.php`)
       .then(r => r.ok ? r.json() : null)
       .then((data: Record<string, string> | null) => {
-        if (data) setDashboardSettings(data);
+        if (data) {
+          setDashboardSettings(data);
+          if (data["role_permissions"]) {
+            try {
+              setRolePermissions(mergeRolePermissions(JSON.parse(data["role_permissions"])));
+            } catch { /* keep defaults */ }
+          }
+        }
       })
       .catch(() => {});
   }, []);
@@ -421,7 +763,10 @@ export default function Dashboard({
   }, [activeTab, tgSchedMonth, tgSchedYear]);
 
   // Load IP bans + recent failed login attempts (the "failed login track")
+  // Only roles granted the Settings section can read these (backend-enforced),
+  // so restricted roles skip the doomed requests entirely.
   useEffect(() => {
+    if (!canSee("settings")) return;
     const loadIpBans = async () => {
       try {
         const res = await fetch(`${API_BASE}/ip-bans.php`);
@@ -444,7 +789,8 @@ export default function Dashboard({
       }
     };
     loadIpBans();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canSee]);
 
   // IP Ban Management Functions
   const handleCreateIpBan = async (e: React.FormEvent) => {
@@ -499,20 +845,16 @@ export default function Dashboard({
 
   const handleRemoveIpBan = async (banId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/ip-bans.php?id=${banId}`, {
-        method: "DELETE",
-      });
-
-      if (res.ok) {
-        showToast("IP ban removed successfully", "success");
-        // Reload bans
-        const bansRes = await fetch(`${API_BASE}/ip-bans.php`);
-        if (bansRes.ok) {
-          const bansData = await bansRes.json();
-          setIpBans(bansData);
-        }
-      } else {
-        showToast("Failed to remove IP ban", "error");
+      // apiDelete retries with POST ?_method=DELETE when a host blocks the
+      // native DELETE verb (ModSecurity on cPanel), and throws an ApiError
+      // carrying the server's real message on failure.
+      await apiDelete(`${API_BASE}/ip-bans.php?id=${banId}`);
+      showToast("IP ban removed successfully", "success");
+      // Reload bans
+      const bansRes = await fetch(`${API_BASE}/ip-bans.php`);
+      if (bansRes.ok) {
+        const bansData = await bansRes.json();
+        setIpBans(bansData);
       }
       // Refresh the failed-attempt track after unbanning.
       try {
@@ -523,7 +865,7 @@ export default function Dashboard({
         }
       } catch { /* non-fatal */ }
     } catch (error) {
-      showToast("Failed to remove IP ban", "error");
+      showToast(error instanceof Error ? error.message : "Failed to remove IP ban", "error");
     }
   };
 
@@ -715,6 +1057,29 @@ export default function Dashboard({
       showToast("API server not running. Start with: npm run server", "error");
     }
     setTgSchedBusyId("");
+    loadTelegramSchedules(tgSchedMonth, tgSchedYear);
+  };
+
+  // Re-schedule an already-SENT broadcast at a new time so it posts again.
+  const tgReschedule = async (rowId: string) => {
+    setTgSchedBusyId(rowId);
+    try {
+      const res = await fetch(`${API_BASE}/telegram.php?action=reschedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: rowId, postTime: tgRescheduleTime }),
+      });
+      const json = await res.json() as { success?: boolean; error?: string };
+      if (json.success) {
+        showToast(`Broadcast re-scheduled for ${tgRescheduleTime} — it will post again.`, "success");
+      } else {
+        showToast(`Reschedule failed: ${json.error}`, "error");
+      }
+    } catch {
+      showToast("API server not running. Start with: npm run server", "error");
+    }
+    setTgSchedBusyId("");
+    setTgRescheduleId(null);
     loadTelegramSchedules(tgSchedMonth, tgSchedYear);
   };
 
@@ -1087,8 +1452,10 @@ export default function Dashboard({
     });
   };
 
-  // Profile Form States
-  const [profileName, setProfileName] = useState("Dr. Andy Osakwe");
+  // Profile Form States — THIS is the logged-in staff user's own profile,
+  // never the public author's. Defaults are empty; they are filled from the
+  // authenticated session on mount (author details live in Settings → Branding).
+  const [profileName, setProfileName] = useState("");
 
   // Avatar initials derived from the actual admin name (no hardcoded "AO").
   const profileInitials = profileName
@@ -1111,19 +1478,46 @@ export default function Dashboard({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
-  const [profileBio, setProfileBio] = useState("Lead pastor and teacher of Andrew Osakwe Ministries.");
-  const [changeEmail, setChangeEmail] = useState("dr.andy@dailyimpact.org");
+  const [profileBio, setProfileBio] = useState("");
+  const [changeEmail, setChangeEmail] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [repeatPassword, setRepeatPassword] = useState("");
   const [showCurrentPw, setShowCurrentPw] = useState(false);
   const [showNewPw, setShowNewPw] = useState(false);
   const [showRepeatPw, setShowRepeatPw] = useState(false);
-  const [is2FAEnabled, setIs2FAEnabled] = useState(false);
-  const [show2FAQr, setShow2FAQr] = useState(false);
+  // ── Real Two-Factor Authentication state (server-persisted) ──
+  const [twofaStatus, setTwofaStatus] = useState<{
+    enabled: boolean;
+    methods: string[];
+    backupRemaining: number;
+  }>({ enabled: false, methods: [], backupRemaining: 0 });
+  const [twofaLoading, setTwofaLoading] = useState(true);
   const [twoFAMethod, setTwoFAMethod] = useState<"app" | "email">("app");
+  // App setup: server-minted secret + QR, then confirm with a live code.
+  const [show2FAQr, setShow2FAQr] = useState(false);
+  const [setupSecret, setSetupSecret] = useState("");
+  const [setupOtpauth, setSetupOtpauth] = useState("");
+  const [appConfirmCode, setAppConfirmCode] = useState("");
+  const [appConfirmStatus, setAppConfirmStatus] = useState<"idle" | "verifying" | "success" | "error">("idle");
+  // Email setup: real OTP sent by the server.
   const [emailOtpSent, setEmailOtpSent] = useState(false);
   const [emailOtpValue, setEmailOtpValue] = useState("");
+  const [emailOtpStatus, setEmailOtpStatus] = useState<"idle" | "verifying" | "success" | "error">("idle");
+  // Backup codes: shown once after activation / regeneration, then confirmed.
+  const [backupCodes, setBackupCodes] = useState<string[]>([]);
+  const [showBackupCodes, setShowBackupCodes] = useState(false);
+  const [backupCodesSaved, setBackupCodesSaved] = useState(false);
+  // Deactivation: requires the live code for the method being disabled.
+  const [deactivateMethod, setDeactivateMethod] = useState<"app" | "email" | null>(null);
+  const [deactivateCode, setDeactivateCode] = useState("");
+  const [deactivateStatus, setDeactivateStatus] = useState<"idle" | "verifying" | "error">("idle");
+  const [deactivateSentOtp, setDeactivateSentOtp] = useState(false);
+  const [deactivateError, setDeactivateError] = useState("");
+  // Admin reset of another user's 2FA.
+  const [reset2faUserId, setReset2faUserId] = useState<string | null>(null);
+  // Two-step confirmation for regenerating backup codes.
+  const [regenerateArmed, setRegenerateArmed] = useState(false);
   
   // IP Ban Management State
   const [ipBans, setIpBans] = useState<any[]>([]);
@@ -1136,7 +1530,7 @@ export default function Dashboard({
   
   // Admin Timezone State
   const [adminTimezone, setAdminTimezone] = useState<string>("Africa/Lagos");
-  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "payments">("profile");
+  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "payments" | "roles">("profile");
   
   // Email Configuration State
   const [emailConfig, setEmailConfig] = useState({
@@ -1156,8 +1550,14 @@ export default function Dashboard({
       secure: 'tls',
       enabled: false
     },
+    donation: {
+      fromName: '',
+      fromEmail: ''
+    },
     notifyEmails: ''
   });
+  const [tgRescheduleId, setTgRescheduleId] = useState<string | null>(null);
+  const [tgRescheduleTime, setTgRescheduleTime] = useState("06:00");
   const [testEmail, setTestEmail] = useState("");
   const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
 
@@ -1854,20 +2254,23 @@ export default function Dashboard({
             )}
 
             {/* MAIN CATEGORY 1: OVERVIEW CONSOLE */}
-            <button
-              onClick={() => setActiveTab("overview")}
-              title="Overview Console"
-              className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center ${sidebarCollapsed ? "justify-center" : "gap-2.5"} transition-all ${
-                activeTab === "overview"
-                  ? "bg-teal-brand text-white shadow-md shadow-teal-brand/10"
-                  : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
-              }`}
-            >
-              <LayoutDashboard className="w-4 h-4 shrink-0" />
-              {!sidebarCollapsed && <span>Overview Console</span>}
-            </button>
+            {canSee("overview") && (
+              <button
+                onClick={() => setActiveTab("overview")}
+                title="Overview Console"
+                className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center ${sidebarCollapsed ? "justify-center" : "gap-2.5"} transition-all ${
+                  activeTab === "overview"
+                    ? "bg-teal-brand text-white shadow-md shadow-teal-brand/10"
+                    : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
+                }`}
+              >
+                <LayoutDashboard className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>Overview Console</span>}
+              </button>
+            )}
 
             {/* MAIN CATEGORY 2: DEVOTIONAL */}
+            {(canSee("manage-devotionals") || canSee("add-devotional") || canSee("import-devotional") || canSee("header-images")) && (
             <div className="space-y-1">
               <button
                 onClick={() => sidebarCollapsed ? setActiveTab("manage-devotionals") : setIsDevotionalOpen(!isDevotionalOpen)}
@@ -1891,6 +2294,7 @@ export default function Dashboard({
 
               {!sidebarCollapsed && isDevotionalOpen && (
                 <div className="pl-6 mt-1 space-y-1 border-l border-slate-200 dark:border-slate-800 ml-5">
+                  {canSee("manage-devotionals") && (
                   <button
                     onClick={() => setActiveTab("manage-devotionals")}
                     className={`w-full text-left py-2 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider block transition-all ${
@@ -1901,6 +2305,8 @@ export default function Dashboard({
                   >
                     List Devotionals
                   </button>
+                  )}
+                  {canSee("add-devotional") && (
                   <button
                     onClick={() => setActiveTab("add-devotional")}
                     className={`w-full text-left py-2 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider block transition-all ${
@@ -1911,6 +2317,8 @@ export default function Dashboard({
                   >
                     Add Devotional
                   </button>
+                  )}
+                  {canSee("import-devotional") && (
                   <button
                     onClick={() => setActiveTab("import-devotional")}
                     className={`w-full text-left py-2 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider block transition-all ${
@@ -1921,6 +2329,8 @@ export default function Dashboard({
                   >
                     Import Devotional
                   </button>
+                  )}
+                  {canSee("header-images") && (
                   <button
                     onClick={() => setActiveTab("header-images")}
                     className={`w-full text-left py-2 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider block transition-all ${
@@ -1931,11 +2341,14 @@ export default function Dashboard({
                   >
                     Header Images
                   </button>
+                  )}
                 </div>
               )}
             </div>
+            )}
 
             {/* MAIN CATEGORY 3: USER MANAGEMENT */}
+            {canSee("user-management") && (
             <button
               onClick={() => setActiveTab("user-management")}
               title="User Management"
@@ -1948,8 +2361,10 @@ export default function Dashboard({
               <Users className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>User Management</span>}
             </button>
+            )}
 
             {/* MAIN CATEGORY 4: TELEGRAM AUTOMATION */}
+            {canSee("telegram-integration") && (
             <button
               onClick={() => setActiveTab("telegram-integration")}
               title="Telegram Channel"
@@ -1962,8 +2377,10 @@ export default function Dashboard({
               <Send className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>Telegram Channel</span>}
             </button>
+            )}
 
             {/* MAIN CATEGORY 5: FOREWORD */}
+            {canSee("foreword") && (
             <button
               onClick={() => setActiveTab("foreword")}
               title="Foreword"
@@ -1976,8 +2393,10 @@ export default function Dashboard({
               <FileText className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>Foreword</span>}
             </button>
+            )}
 
             {/* MAIN CATEGORY 6: PAYMENTS & DONATIONS */}
+            {canSee("payments") && (
             <button
               onClick={() => setActiveTab("payments")}
               title="Payments & Donations"
@@ -1990,8 +2409,10 @@ export default function Dashboard({
               <CreditCard className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>Payments & Donations</span>}
             </button>
+            )}
 
             {/* MAIN CATEGORY 7: WEBSITE ANALYTICS */}
+            {canSee("analytics") && (
             <button
               onClick={() => setActiveTab("analytics")}
               title="Website Analytics"
@@ -2004,8 +2425,10 @@ export default function Dashboard({
               <BarChart3 className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>Analytics</span>}
             </button>
+            )}
 
             {/* MAIN CATEGORY 8: SETTINGS */}
+            {canSee("settings") && (
             <button
               onClick={() => setActiveTab("settings")}
               title="Settings"
@@ -2018,6 +2441,7 @@ export default function Dashboard({
               <Settings className="w-4 h-4 shrink-0" />
               {!sidebarCollapsed && <span>Settings</span>}
             </button>
+            )}
 
           </div>
 
@@ -2086,73 +2510,130 @@ export default function Dashboard({
             </motion.div>
           )}
           
-          {/* MOBILE TABS SLIDER HEADER */}
-          <div className="flex md:hidden items-center gap-2 overflow-x-auto pb-4 mb-4 border-b border-slate-200 dark:border-slate-800 scrollbar-none select-none">
-            <button 
-              onClick={() => setActiveTab("overview")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "overview" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+          {/* MOBILE HEADER — hamburger + active section; opens the left drawer
+              (replaces the old horizontally-scrolling capsule menu) */}
+          <div className="flex md:hidden items-center justify-between gap-2 pb-4 mb-4 border-b border-slate-200 dark:border-slate-800 select-none">
+            <AnimatedHamburger
+              open={mobileMenuOpen}
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className={`p-2 rounded-xl border transition-all ${
+                isDarkMode
+                  ? "bg-slate-800 border-slate-700 text-slate-200"
+                  : "bg-white border-slate-200 text-slate-700"
               }`}
-            >
-              Overview
-            </button>
-            <button 
-              onClick={() => setActiveTab("add-devotional")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "add-devotional" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Add
-            </button>
-            <button 
-              onClick={() => setActiveTab("manage-devotionals")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "manage-devotionals" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Manage
-            </button>
-            <button 
-              onClick={() => setActiveTab("header-images")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "header-images" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Header Images
-            </button>
-            <button 
-              onClick={() => setActiveTab("user-management")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "user-management" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Users
-            </button>
-            <button 
-              onClick={() => setActiveTab("settings")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "settings" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Settings
-            </button>
-            <button 
-              onClick={() => setActiveTab("telegram-integration")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "telegram-integration" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Telegram
-            </button>
-            <button 
-              onClick={() => setActiveTab("analytics")} 
-              className={`py-1 px-3 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0 transition-colors ${
-                activeTab === "analytics" ? "bg-teal-brand text-white" : "bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-              }`}
-            >
-              Analytics
-            </button>
+            />
+            <span className="text-[11px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400 truncate">
+              {(
+                {
+                  overview: "Overview",
+                  "add-devotional": "Add Devotional",
+                  "manage-devotionals": "Manage Devotionals",
+                  "import-devotional": "Import Devotional",
+                  "header-images": "Header Images",
+                  "user-management": "User Management",
+                  foreword: "Foreword",
+                  payments: "Payments & Donations",
+                  analytics: "Analytics",
+                  settings: "Settings",
+                  "telegram-integration": "Telegram Channel",
+                } as Record<string, string>
+              )[activeTab] ?? "Menu"}
+            </span>
           </div>
+
+          {/* MOBILE LEFT DRAWER — slides in from the left with a page overlay;
+              closes on item select, backdrop tap, or Escape; locks page scroll */}
+          {mobileMenuOpen && (
+            <div className="fixed inset-0 z-[80] md:hidden">
+              {/* Backdrop */}
+              <div
+                className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-in fade-in duration-300"
+                onClick={() => setMobileMenuOpen(false)}
+              />
+              {/* Drawer panel */}
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Publisher navigation"
+                className={`absolute inset-y-0 left-0 w-[78%] max-w-[300px] shadow-2xl border-r p-4 overflow-y-auto animate-in slide-in-from-left-3 duration-300 flex flex-col ${
+                  isDarkMode
+                    ? "bg-slate-900 border-slate-800 text-slate-100"
+                    : "bg-white border-slate-200 text-slate-800"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Publisher Menu
+                  </span>
+                  <button
+                    onClick={() => setMobileMenuOpen(false)}
+                    aria-label="Close menu"
+                    className={`p-1.5 rounded-lg border transition-all ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-slate-300"
+                        : "bg-slate-50 border-slate-200 text-slate-600"
+                    }`}
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24">
+                      <path d="M18 6 6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="space-y-1 flex-1 overflow-y-auto">
+                  {(
+                    [
+                      { id: "overview", label: "Overview", sec: "overview" },
+                      { id: "add-devotional", label: "Add Devotional", sec: "add-devotional" },
+                      { id: "manage-devotionals", label: "Manage Devotionals", sec: "manage-devotionals" },
+                      { id: "import-devotional", label: "Import Devotional", sec: "import-devotional" },
+                      { id: "header-images", label: "Header Images", sec: "header-images" },
+                      { id: "user-management", label: "User Management", sec: "user-management" },
+                      { id: "foreword", label: "Foreword", sec: "foreword" },
+                      { id: "payments", label: "Payments & Donations", sec: "payments" },
+                      { id: "telegram-integration", label: "Telegram Channel", sec: "telegram-integration" },
+                      { id: "analytics", label: "Analytics", sec: "analytics" },
+                      { id: "settings", label: "Settings", sec: "settings" },
+                    ] as {
+                      id: "overview" | "add-devotional" | "manage-devotionals" | "header-images" | "user-management" | "settings" | "import-devotional" | "telegram-integration" | "foreword" | "payments" | "analytics";
+                      label: string;
+                      sec: string;
+                    }[]
+                  )
+                    .filter((i) => canSee(i.sec))
+                    .map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setActiveTab(item.id);
+                          setMobileMenuOpen(false);
+                        }}
+                        className={`w-full text-left py-2.5 px-3 rounded-xl text-xs font-bold tracking-wider transition-all ${
+                          activeTab === item.id
+                            ? "bg-teal-brand/10 text-teal-brand font-black"
+                            : isDarkMode
+                            ? "text-slate-400 hover:bg-slate-800/60 hover:text-white"
+                            : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                </div>
+
+                <button
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onExitDashboard();
+                  }}
+                  className="mt-3 w-full py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider text-rose-500 hover:bg-rose-500/10 active:scale-[0.98] transition-all flex items-center justify-center gap-2 border border-rose-500/10 hover:border-rose-500/20"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Logout
+                </button>
+              </div>
+            </div>
+          )}
 
           <AnimatePresence mode="wait">
             <motion.div
@@ -2349,6 +2830,7 @@ export default function Dashboard({
                       Quick Publisher Shortcuts
                     </h3>
                     <div className="flex flex-wrap gap-3">
+                      {canSee("add-devotional") && (
                       <button
                         onClick={() => setActiveTab("add-devotional")}
                         className="py-2 px-4 rounded-xl text-xs font-bold uppercase tracking-wider bg-teal-brand text-white hover:opacity-90 active:scale-[0.98] transition-all flex items-center gap-1.5"
@@ -2356,7 +2838,9 @@ export default function Dashboard({
                         <PlusCircle className="w-4 h-4" />
                         Add Devotional
                       </button>
+                      )}
 
+                      {canSee("manage-devotionals") && (
                       <button
                         onClick={() => setActiveTab("manage-devotionals")}
                         className="py-2 px-4 rounded-xl text-xs font-bold uppercase tracking-wider bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:opacity-90 active:scale-[0.98] transition-all flex items-center gap-1.5"
@@ -2364,7 +2848,9 @@ export default function Dashboard({
                         <BookOpen className="w-4 h-4" />
                         Browse & Edit
                       </button>
+                      )}
 
+                      {canSee("header-images") && (
                       <button
                         onClick={() => setActiveTab("header-images")}
                         className="py-2 px-4 rounded-xl text-xs font-bold uppercase tracking-wider bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:opacity-90 active:scale-[0.98] transition-all flex items-center gap-1.5"
@@ -2372,6 +2858,7 @@ export default function Dashboard({
                         <Image className="w-4 h-4" />
                         Upload Header Images
                       </button>
+                      )}
                     </div>
                   </div>
 
@@ -3123,7 +3610,14 @@ export default function Dashboard({
                                     {user.name.split(" ").map(n => n[0]).join("")}
                                   </div>
                                   <div>
-                                    <p className="text-slate-950 dark:text-white font-black">{user.name}</p>
+                                    <p className="text-slate-950 dark:text-white font-black flex items-center gap-1.5">
+                                      {user.name}
+                                      {user.twofa?.enabled && (
+                                        <span className="px-1.5 py-0.5 rounded bg-teal-brand/10 border border-teal-brand/30 text-teal-brand text-[8px] font-black uppercase tracking-wider flex items-center gap-0.5">
+                                          <ShieldCheck className="w-2.5 h-2.5" /> 2FA
+                                        </span>
+                                      )}
+                                    </p>
                                     <span className="text-[10px] font-mono text-slate-400 font-bold">Created {user.createdAt}</span>
                                   </div>
                                 </div>
@@ -3174,6 +3668,28 @@ export default function Dashboard({
                                   >
                                     <Settings className="w-3.5 h-3.5" />
                                   </button>
+
+                                  {/* Reset 2FA (Administrators only, users with 2FA on) */}
+                                  {myRole === "Administrator" && user.twofa?.enabled && (
+                                    <button
+                                      onClick={() => {
+                                        if (reset2faUserId === user.id) {
+                                          handleAdminReset2fa(user.id, user.name);
+                                        } else {
+                                          setReset2faUserId(user.id);
+                                          setTimeout(() => setReset2faUserId((cur) => (cur === user.id ? null : cur)), 5000);
+                                        }
+                                      }}
+                                      className={`p-1 rounded-md border transition-colors ${
+                                        reset2faUserId === user.id
+                                          ? "bg-amber-500 border-amber-500 text-white"
+                                          : "border-amber-200 dark:border-amber-900/30 text-amber-500 hover:bg-amber-500/10"
+                                      }`}
+                                      title={reset2faUserId === user.id ? "Tap again to confirm — removes this user's 2FA" : "Reset this user's 2FA (removes authenticator + email OTP + backup codes)"}
+                                    >
+                                      <ShieldOff className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
 
                                   {/* Delete user */}
                                   {user.name !== "Dr. Andy Osakwe" && (
@@ -3274,6 +3790,21 @@ export default function Dashboard({
                       <CreditCard className="w-4 h-4" />
                       Payments & Donations
                     </button>
+
+                    {isAdministrator && (
+                      <button
+                        type="button"
+                        onClick={() => setSettingsSubTab("roles")}
+                        className={`pb-2.5 px-1 border-b-2 transition-all flex items-center gap-2 ${
+                          settingsSubTab === "roles"
+                            ? "border-teal-brand text-teal-brand font-black"
+                            : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                        }`}
+                      >
+                        <ShieldCheck className="w-4 h-4" />
+                        Roles & Permissions
+                      </button>
+                    )}
                   </div>
 
                   {/* Tab Contents */}
@@ -3294,7 +3825,7 @@ export default function Dashboard({
 
                           <div className="space-y-3">
                             <div className="space-y-1">
-                              <label className="text-slate-500">Public/Author Name</label>
+                              <label className="text-slate-500">Staff Name (your profile)</label>
                               <input
                                 type="text"
                                 value={profileName}
@@ -3306,7 +3837,7 @@ export default function Dashboard({
                             </div>
 
                             <div className="space-y-1">
-                              <label className="text-slate-500">Author Bio</label>
+                              <label className="text-slate-500">Staff Bio (your profile)</label>
                               <textarea
                                 rows={3}
                                 value={profileBio}
@@ -3316,6 +3847,12 @@ export default function Dashboard({
                                 }`}
                               />
                             </div>
+
+                            <p className="text-[10px] leading-relaxed text-slate-400 dark:text-slate-500">
+                              This is your personal staff profile — shown to you and other staff. The public
+                              author name, title and bio (seen on the "About the Author" page) are set
+                              separately in the <span className="font-bold text-teal-brand">Branding & Assets</span> tab.
+                            </p>
 
                             <div className="space-y-1">
                               <label className="text-slate-500">Credential Email Address</label>
@@ -3341,7 +3878,7 @@ export default function Dashboard({
                                   const res = await fetch(`${API_BASE}/admin.php?action=update-profile`, {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ name: profileName, email: changeEmail }),
+                                    body: JSON.stringify({ name: profileName, email: changeEmail, bio: profileBio }),
                                   });
                                   const json = await res.json();
                                   if (!res.ok || !json.success) {
@@ -3349,6 +3886,7 @@ export default function Dashboard({
                                     return;
                                   }
                                   setProfileName(json.user?.name || profileName);
+                                  setProfileBio(json.user?.bio ?? profileBio);
                                   setChangeEmail(json.user?.email || changeEmail);
                                   setUsers([{ id: "current-admin", name: json.user?.name || profileName, email: json.user?.email || changeEmail, role: "Administrator", status: "Active", createdAt: "" }]);
                                   showToast("Staff profile details updated successfully.");
@@ -3553,330 +4091,325 @@ export default function Dashboard({
 
                           <div className="space-y-4">
                             <p className="text-[11px] leading-relaxed text-slate-500">
-                              Enhance security on your admin account by requiring a second verification step alongside your password. Choose your preferred method below.
+                              Add a second verification step beyond your password. Every method is confirmed with a live code before it activates — the server verifies it, so a random number can never be accepted.
                             </p>
+
+                            {/* Live status summary */}
+                            <div className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                              twofaStatus.enabled
+                                ? "bg-teal-brand/10 border-teal-brand/20"
+                                : "bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800"
+                            }`}>
+                              <div className="flex items-center gap-2.5">
+                                <ShieldCheck className={`w-4 h-4 shrink-0 ${twofaStatus.enabled ? "text-teal-brand" : "text-slate-400"}`} />
+                                <div>
+                                  <p className="text-[11px] font-black text-slate-800 dark:text-slate-200">
+                                    {twofaLoading ? "Checking 2FA status…" : twofaStatus.enabled ? "Two-factor authentication is ON" : "Two-factor authentication is OFF"}
+                                  </p>
+                                  {twofaStatus.enabled && (
+                                    <p className="text-[9px] font-bold text-slate-400 mt-0.5">
+                                      {twofaStatus.methods.map((m) => (m === "app" ? "Authenticator App" : "Email OTP")).join(" + ")}
+                                      {" · "}{twofaStatus.backupRemaining} backup code{twofaStatus.backupRemaining === 1 ? "" : "s"} remaining
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                              {twofaStatus.enabled && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (regenerateArmed) {
+                                      setRegenerateArmed(false);
+                                      handleRegenerateBackup();
+                                    } else {
+                                      setRegenerateArmed(true);
+                                      setTimeout(() => setRegenerateArmed(false), 4000);
+                                    }
+                                  }}
+                                  className={`py-1.5 px-3 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors whitespace-nowrap ${
+                                    regenerateArmed
+                                      ? "bg-amber-500 text-white"
+                                      : twofaStatus.backupRemaining <= 1
+                                        ? "bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500 hover:text-white"
+                                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-teal-brand"
+                                  }`}
+                                >
+                                  {regenerateArmed ? "Tap again to confirm" : "Regenerate codes"}
+                                </button>
+                              )}
+                            </div>
 
                             {/* Method Selector Tabs */}
                             <div className="flex gap-2 p-1 rounded-xl bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
                               <button
                                 type="button"
-                                onClick={() => { setTwoFAMethod("app"); setShow2FAQr(false); setEmailOtpSent(false); }}
-                                className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
+                                onClick={() => { setTwoFAMethod("app"); setEmailOtpSent(false); setEmailOtpValue(""); setEmailOtpStatus("idle"); }}
+                                className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 ${
                                   twoFAMethod === "app"
                                     ? "bg-white dark:bg-slate-800 text-teal-brand shadow-sm"
                                     : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
                                 }`}
                               >
-                                📱 Authenticator App
+                                <Smartphone className="w-3 h-3" /> Authenticator App
                               </button>
                               <button
                                 type="button"
-                                onClick={() => { setTwoFAMethod("email"); setShow2FAQr(false); setEmailOtpSent(false); }}
-                                className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
+                                onClick={() => { setTwoFAMethod("email"); setShow2FAQr(false); setAppConfirmCode(""); setAppConfirmStatus("idle"); }}
+                                className={`flex-1 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 ${
                                   twoFAMethod === "email"
                                     ? "bg-white dark:bg-slate-800 text-teal-brand shadow-sm"
                                     : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
                                 }`}
                               >
-                                ✉️ Email OTP
+                                <Mail className="w-3 h-3" /> Email OTP
                               </button>
                             </div>
 
                             {/* Authenticator App Method */}
                             {twoFAMethod === "app" && (
                               <div className="space-y-3">
-                                <div className="flex items-center justify-between p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
+                                <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
                                   <div>
                                     <p className="font-bold text-slate-800 dark:text-slate-200 text-sm">Authenticator Code App</p>
-                                    <span className="text-[10px] text-slate-400">Google Authenticator or Duo Security</span>
+                                    <span className="text-[10px] text-slate-400">
+                                      {twofaStatus.methods.includes("app")
+                                        ? "Active — a code is required at every login"
+                                        : "Google Authenticator, Microsoft Authenticator or Duo Security"}
+                                    </span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (is2FAEnabled && twoFAMethod === "app") {
-                                        setIs2FAEnabled(false);
-                                        setShow2FAQr(false);
-                                        showToast("Two-Factor Authentication is now disabled.", "info");
-                                      } else {
-                                        setShow2FAQr(true);
-                                      }
-                                    }}
-                                    className={`py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                                      is2FAEnabled && twoFAMethod === "app"
-                                        ? "bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white"
-                                        : "bg-teal-brand text-white hover:opacity-90"
-                                    }`}
-                                  >
-                                    {is2FAEnabled && twoFAMethod === "app" ? "Disable" : "Configure"}
-                                  </button>
+                                  {twofaStatus.methods.includes("app") ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleBeginDeactivate("app")}
+                                      className="py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white"
+                                    >
+                                      Disable
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={handleStartAppSetup}
+                                      disabled={appConfirmStatus === "verifying"}
+                                      className="py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-teal-brand text-white hover:opacity-90 disabled:opacity-50"
+                                    >
+                                      {show2FAQr ? "Set up" : "Configure"}
+                                    </button>
+                                  )}
                                 </div>
 
-                                {show2FAQr && (() => {
-                                  const platformName = "Daily Impact Devotional";
-                                  const adminName = users[0]?.name || "Admin";
-                                  const label = `${platformName} (${adminName})`;
-                                  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-                                  // Reuse existing secret or generate a new one for this session
-                                  let secret = dashboardSettings.totp_secret;
-                                  if (!secret || secret.length < 16) {
-                                    secret = "";
-                                    for (let i = 0; i < 16; i++) secret += chars[Math.floor(Math.random() * chars.length)];
-                                  }
-                                  // TOTP URI: issuer is the platform name, account is admin name
-                                  const totpUrl = `otpauth://totp/${encodeURIComponent(platformName)}:${encodeURIComponent(adminName)}?secret=${secret}&issuer=${encodeURIComponent(platformName)}`;
-                                  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(totpUrl)}`;
-                                  return (
-                                    <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950/60 text-center space-y-3 animate-in fade-in zoom-in-95 duration-200">
-                                      <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Scan with your authenticator app</span>
-                                      <div className="w-36 h-36 border p-1 bg-white rounded-lg mx-auto flex items-center justify-center overflow-hidden">
-                                        <img src={qrUrl} alt="2FA QR Code" className="w-full h-full object-contain" crossOrigin="anonymous" />
+                                {show2FAQr && !twofaStatus.methods.includes("app") && (
+                                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950/60 text-center space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                    {!setupSecret ? (
+                                      <div className="py-6 flex flex-col items-center gap-2">
+                                        <RefreshCw className="w-5 h-5 text-teal-brand animate-spin" />
+                                        <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Generating a secure secret…</span>
                                       </div>
-                                      <p className="text-[10px] font-mono font-bold text-teal-400 uppercase tracking-widest break-all px-2">
-                                        {secret.match(/.{1,4}/g)?.join(" ") || secret}
-                                      </p>
-                                      <p className="text-[9px] text-slate-500">
-                                        App will show: <strong className="text-slate-300">{platformName}</strong> — <strong className="text-teal-400">{adminName}</strong>
-                                      </p>
-                                      <div className="pt-1 flex justify-center gap-2">
-                                        <button type="button" onClick={() => setShow2FAQr(false)}
-                                          className="py-1 px-3 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded text-[10px] font-bold uppercase tracking-wider">
+                                    ) : (
+                                      <>
+                                        <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Scan with your authenticator app</span>
+                                        <div className="w-36 h-36 border p-1 bg-white rounded-lg mx-auto flex items-center justify-center overflow-hidden">
+                                          <img
+                                            src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(setupOtpauth)}`}
+                                            alt="2FA QR Code"
+                                            className="w-full h-full object-contain"
+                                            crossOrigin="anonymous"
+                                          />
+                                        </div>
+                                        <p className="text-[10px] font-mono font-bold text-teal-400 uppercase tracking-widest break-all px-2">
+                                          {setupSecret.match(/.{1,4}/g)?.join(" ") || setupSecret}
+                                        </p>
+                                        <p className="text-[9px] text-slate-500">
+                                          App will show: <strong className="text-slate-300">Daily Impact Devotional</strong> — <strong className="text-teal-400">{profileName || "Admin"}</strong>
+                                        </p>
+                                        <p className="text-[9px] font-bold text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                                          After scanning, enter the 6-digit code from the app below to confirm.
+                                        </p>
+                                        <OtpCodeInput
+                                          value={appConfirmCode}
+                                          onChange={setAppConfirmCode}
+                                          onComplete={handleConfirmAppSetup}
+                                          status={appConfirmStatus}
+                                          dark={isDarkMode}
+                                          disabled={appConfirmStatus === "verifying"}
+                                        />
+                                        {appConfirmStatus === "error" && (
+                                          <p className="text-[10px] font-bold text-rose-500">Invalid code — check your app and try again.</p>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => { setShow2FAQr(false); setSetupSecret(""); setSetupOtpauth(""); setAppConfirmCode(""); setAppConfirmStatus("idle"); }}
+                                          className="py-1 px-3 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded text-[10px] font-bold uppercase tracking-wider"
+                                        >
                                           Cancel
                                         </button>
-                                        <button type="button" onClick={() => { setIs2FAEnabled(true); setShow2FAQr(false); showToast(`2FA activated for ${adminName}!`); }}
-                                          className="py-1 px-3 bg-teal-brand text-white rounded text-[10px] font-black uppercase tracking-wider">
-                                          Activate
-                                        </button>
-                                      </div>
-                                    </div>
-                                  );
-                                })()}
+                                      </>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             )}
 
                             {/* Email OTP Method */}
                             {twoFAMethod === "email" && (
                               <div className="space-y-3">
-                                <div className="flex items-center justify-between p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
+                                <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
                                   <div>
                                     <p className="font-bold text-slate-800 dark:text-slate-200 text-sm">Email One-Time Password</p>
-                                    <span className="text-[10px] text-slate-400">{changeEmail}</span>
+                                    <span className="text-[10px] text-slate-400">
+                                      {twofaStatus.methods.includes("email")
+                                        ? `Active — a code is emailed to ${changeEmail} at every login`
+                                        : changeEmail}
+                                    </span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (is2FAEnabled && twoFAMethod === "email") {
-                                        setIs2FAEnabled(false);
-                                        setEmailOtpSent(false);
-                                        setEmailOtpValue("");
-                                        showToast("Email OTP 2FA is now disabled.", "info");
-                                      } else {
-                                        setEmailOtpSent(true);
-                                        setEmailOtpValue("");
-                                        showToast(`OTP sent to ${changeEmail}`, "success");
-                                      }
-                                    }}
-                                    className={`py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${
-                                      is2FAEnabled && twoFAMethod === "email"
-                                        ? "bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white"
-                                        : "bg-teal-brand text-white hover:opacity-90"
-                                    }`}
-                                  >
-                                    {is2FAEnabled && twoFAMethod === "email" ? "Disable" : "Send OTP"}
-                                  </button>
+                                  {twofaStatus.methods.includes("email") ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleBeginDeactivate("email")}
+                                      className="py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white"
+                                    >
+                                      Disable
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={handleSendEmailOtp}
+                                      disabled={emailOtpStatus === "verifying"}
+                                      className="py-1.5 px-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-teal-brand text-white hover:opacity-90 disabled:opacity-50"
+                                    >
+                                      Send OTP
+                                    </button>
+                                  )}
                                 </div>
 
-                                {emailOtpSent && !is2FAEnabled && (
+                                {emailOtpSent && !twofaStatus.methods.includes("email") && (
                                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950/60 space-y-3 animate-in fade-in zoom-in-95 duration-200">
                                     <p className="text-[10px] font-bold uppercase text-slate-500 tracking-wider text-center">
-                                      Enter the 6-digit OTP sent to your email
+                                      Enter the 6-digit code sent to {changeEmail}
                                     </p>
-                                    <input
-                                      type="text"
-                                      maxLength={6}
-                                      placeholder="000000"
+                                    <OtpCodeInput
                                       value={emailOtpValue}
-                                      onChange={(e) => setEmailOtpValue(e.target.value.replace(/\D/g, ""))}
-                                      className={`w-full py-2.5 px-4 text-center text-lg font-mono font-black border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 tracking-[0.5em] ${
-                                        isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-white border-slate-200 text-slate-900"
-                                      }`}
+                                      onChange={setEmailOtpValue}
+                                      onComplete={handleConfirmEmailSetup}
+                                      status={emailOtpStatus}
+                                      dark={isDarkMode}
+                                      disabled={emailOtpStatus === "verifying"}
                                     />
+                                    {emailOtpStatus === "error" && (
+                                      <p className="text-[10px] font-bold text-rose-500 text-center">Invalid code — check your email and try again.</p>
+                                    )}
                                     <div className="flex justify-center gap-2">
-                                      <button type="button" onClick={() => { setEmailOtpSent(false); setEmailOtpValue(""); }}
+                                      <button type="button" onClick={() => { setEmailOtpSent(false); setEmailOtpValue(""); setEmailOtpStatus("idle"); }}
                                         className="py-1 px-3 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded text-[10px] font-bold uppercase tracking-wider">
                                         Cancel
                                       </button>
-                                      <button type="button" onClick={() => {
-                                        if (emailOtpValue.length !== 6) {
-                                          showToast("Please enter the full 6-digit OTP.", "error");
-                                          return;
-                                        }
-                                        setIs2FAEnabled(true);
-                                        setEmailOtpSent(false);
-                                        setEmailOtpValue("");
-                                        showToast("Email OTP Two-Factor Authentication activated!");
-                                      }}
+                                      <button type="button" onClick={handleSendEmailOtp}
                                         className="py-1 px-3 bg-teal-brand text-white rounded text-[10px] font-black uppercase tracking-wider">
-                                        Verify & Activate
+                                        Resend OTP
                                       </button>
                                     </div>
-                                    <p className="text-[9px] text-center text-slate-400 font-bold">
-                                      Didn't receive it?{" "}
-                                      <button type="button" onClick={() => showToast(`OTP resent to ${changeEmail}`, "success")}
-                                        className="text-teal-brand underline">Resend OTP</button>
-                                    </p>
-                                  </div>
-                                )}
-
-                                {is2FAEnabled && twoFAMethod === "email" && (
-                                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold flex items-center gap-2">
-                                    <CheckCircle className="w-4 h-4 shrink-0" />
-                                    Email OTP 2FA is active. A code will be sent to {changeEmail} on every login.
                                   </div>
                                 )}
                               </div>
                             )}
 
-                            {/* Active 2FA Status Badge */}
-                            {is2FAEnabled && (
-                              <div className="p-3 rounded-xl bg-teal-brand/10 border border-teal-brand/20 text-teal-brand text-[10px] font-bold flex items-center gap-2">
-                                <ShieldCheck className="w-4 h-4 shrink-0" />
-                                2FA is currently enabled via {twoFAMethod === "app" ? "Authenticator App" : "Email OTP"}.
+                            {/* Deactivation confirmation — requires the live code */}
+                            {deactivateMethod && (
+                              <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/5 space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                <p className="text-[10px] font-black uppercase tracking-wider text-rose-500 flex items-center gap-1.5">
+                                  <AlertCircle className="w-3.5 h-3.5" />
+                                  Disable {deactivateMethod === "app" ? "Authenticator App" : "Email OTP"} 2FA
+                                </p>
+                                <p className="text-[10px] text-slate-500 font-semibold">
+                                  {deactivateMethod === "app"
+                                    ? "Enter the current 6-digit code from your authenticator app to confirm."
+                                    : deactivateSentOtp
+                                      ? `Enter the code sent to ${changeEmail}.`
+                                      : "Sending a verification code to your email…"}
+                                </p>
+                                {deactivateError && (
+                                  <p className="text-[10px] font-bold text-rose-500">{deactivateError}</p>
+                                )}
+                                <OtpCodeInput
+                                  value={deactivateCode}
+                                  onChange={setDeactivateCode}
+                                  onComplete={handleConfirmDeactivate}
+                                  status={deactivateStatus === "error" ? "error" : deactivateStatus === "verifying" ? "verifying" : "idle"}
+                                  dark={isDarkMode}
+                                  disabled={deactivateStatus === "verifying"}
+                                />
+                                <div className="flex justify-center gap-2">
+                                  <button type="button" onClick={() => { setDeactivateMethod(null); setDeactivateCode(""); setDeactivateStatus("idle"); setDeactivateError(""); }}
+                                    className="py-1 px-3 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded text-[10px] font-bold uppercase tracking-wider">
+                                    Cancel
+                                  </button>
+                                </div>
                               </div>
                             )}
-                          </div>
-                        </div>
 
-                        {/* IP Ban Management */}
-                        <div className={`p-6 rounded-2xl border space-y-4 ${
-                          isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-900"
-                        }`}>
-                          <h3 className="font-serif text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                            <Ban className="w-4 h-4 text-teal-brand" />
-                            IP Ban Management
-                          </h3>
-
-                          <div className="space-y-4">
-                            <p className="text-[11px] leading-relaxed text-slate-500">
-                              Manage IP address bans for security. Bans affect entire IP subnets and stay active until you unban them here — they do not expire automatically.
-                            </p>
-
-                            {/* Create New Ban Form */}
-                            <form onSubmit={handleCreateIpBan} className="space-y-3">
-                              <div className="space-y-1">
-                                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">IP Address to Ban</label>
-                                <input
-                                  type="text"
-                                  placeholder="e.g., 192.168.1.1"
-                                  value={newBanIp}
-                                  onChange={(e) => setNewBanIp(e.target.value)}
-                                  className={`w-full py-2 pl-3 pr-10 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
-                                    isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
-                                  }`}
-                                />
-                              </div>
-
-                              <div className="space-y-1">
-                                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Reason (optional)</label>
-                                <input
-                                  type="text"
-                                  placeholder="e.g., Suspicious activity"
-                                  value={newBanReason}
-                                  onChange={(e) => setNewBanReason(e.target.value)}
-                                  className={`w-full py-2 pl-3 pr-10 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
-                                    isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
-                                  }`}
-                                />
-                              </div>
-
-                              <div className="space-y-1">
-                                <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Associated Email (optional)</label>
-                                <input
-                                  type="email"
-                                  placeholder="e.g., user@example.com"
-                                  value={newBanEmail}
-                                  onChange={(e) => setNewBanEmail(e.target.value)}
-                                  className={`w-full py-2 pl-3 pr-10 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
-                                    isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
-                                  }`}
-                                />
-                              </div>
-
-                              <button
-                                type="submit"
-                                disabled={isCreatingBan}
-                                className="w-full py-2.5 px-4 rounded-xl uppercase tracking-wider text-[11px] font-black bg-rose-500 text-white hover:bg-rose-600 transition-opacity active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                {isCreatingBan ? "Creating Ban..." : "Create IP Ban"}
-                              </button>
-                            </form>
-
-                            {/* Existing Bans List */}
-                            <div className="space-y-2">
-                              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider">Active Bans ({ipBans.filter(b => b.active).length})</span>
-                              <div className="max-h-48 overflow-y-auto space-y-2">
-                                {ipBans.filter(b => b.active).length === 0 ? (
-                                  <p className="text-[10px] text-slate-400 italic py-2">No active IP bans</p>
-                                ) : (
-                                  ipBans.filter(b => b.active).map((ban) => (
-                                    <div key={ban.id} className={`p-3 rounded-lg border ${
-                                      isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
-                                    }`}>
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="flex-1 min-w-0">
-                                          <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">{ban.ipAddress}</p>
-                                          <p className="text-[10px] text-slate-500 truncate">CIDR: {ban.cidr}</p>
-                                          <p className="text-[10px] text-slate-400 truncate">{ban.reason}</p>
-                                          {ban.email && <p className="text-[10px] text-slate-400 truncate">Email: {ban.email}</p>}
-                                        </div>
-                                        <button
-                                          onClick={() => handleRemoveIpBan(ban.id)}
-                                          className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white transition-colors"
-                                          title="Unban IP"
-                                        >
-                                          <CheckCircle className="w-4 h-4" />
-                                        </button>
-                                      </div>
+                            {/* Backup codes — shown once after activation / regeneration */}
+                            {showBackupCodes && backupCodes.length > 0 && (
+                              <div className="p-4 rounded-xl border border-teal-brand/30 bg-teal-brand/5 space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                <div className="flex items-center gap-2">
+                                  <ShieldCheck className="w-4 h-4 text-teal-brand" />
+                                  <p className="text-[11px] font-black text-slate-800 dark:text-slate-200">Save your backup codes</p>
+                                </div>
+                                <p className="text-[10px] text-slate-500 font-semibold leading-relaxed">
+                                  Each code can be used <strong>once</strong> to sign in if you ever lose access to your authenticator app or email. Store them somewhere safe — they will not be shown again.
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                  {backupCodes.map((c) => (
+                                    <div key={c} className="py-2 px-3 rounded-lg bg-slate-950 dark:bg-slate-900 border border-slate-800 font-mono font-black text-teal-400 text-xs tracking-widest text-center">
+                                      {c}
                                     </div>
-                                  ))
-                                )}
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const text = backupCodes.join("\n");
+                                    if (navigator.clipboard?.writeText) {
+                                      navigator.clipboard.writeText(text).then(() => showToast("Backup codes copied to clipboard.", "success")).catch(() => {});
+                                    }
+                                  }}
+                                  className="flex items-center justify-center gap-1.5 py-1.5 px-3 mx-auto rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-teal-brand text-[10px] font-black uppercase tracking-wider transition-colors"
+                                >
+                                  <Copy className="w-3 h-3" /> Copy all
+                                </button>
+                                <label className="flex items-center justify-center gap-2 text-[10px] font-bold text-slate-500 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={backupCodesSaved}
+                                    onChange={(e) => setBackupCodesSaved(e.target.checked)}
+                                    className="w-3.5 h-3.5 accent-teal-brand cursor-pointer"
+                                  />
+                                  I have saved these codes
+                                </label>
+                                <button
+                                  type="button"
+                                  disabled={!backupCodesSaved}
+                                  onClick={() => {
+                                    setShowBackupCodes(false);
+                                    setBackupCodes([]);
+                                    setBackupCodesSaved(false);
+                                    setShow2FAQr(false);
+                                    setSetupSecret("");
+                                    setSetupOtpauth("");
+                                    setEmailOtpSent(false);
+                                    setEmailOtpValue("");
+                                    loadTwofaStatus(true);
+                                    showToast("Two-factor authentication is now active.", "success");
+                                  }}
+                                  className="w-full py-2.5 px-4 rounded-xl bg-teal-brand text-white text-[11px] font-black uppercase tracking-widest hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  I've saved them — finish
+                                </button>
                               </div>
-                            </div>
-
-                            {/* Failed Login Track — recent unsuccessful attempts */}
-                            <div className="space-y-2">
-                              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider">Failed Login Track ({failedLogins.length} recent)</span>
-                              <div className="max-h-44 overflow-y-auto space-y-1.5">
-                                {failedLogins.length === 0 ? (
-                                  <p className="text-[10px] text-slate-400 italic py-2">No failed login attempts recorded.</p>
-                                ) : (
-                                  failedLogins.slice(0, 25).map((log) => {
-                                    const ipMatch = ipBans.find(b => b.active && (b.ipAddress === log.ip || (log.ip && b.cidr && log.ip.startsWith(b.cidr.split("/")[0]))));
-                                    return (
-                                      <div key={log.id} className={`p-2.5 rounded-lg border flex items-start justify-between gap-2 ${
-                                        isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
-                                      }`}>
-                                        <div className="flex-1 min-w-0">
-                                          <p className="text-[10px] font-bold text-slate-700 dark:text-slate-300 truncate">{log.email || "(no email)"}</p>
-                                          <p className="text-[9px] font-mono text-slate-500 truncate">{log.ip} • {new Date(log.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</p>
-                                          <p className="text-[9px] text-slate-400 truncate">{log.location || "Location unknown"}</p>
-                                        </div>
-                                        {ipMatch ? (
-                                          <button
-                                            onClick={() => handleRemoveIpBan(ipMatch.id)}
-                                            className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white transition-colors shrink-0"
-                                            title={`Unban ${log.ip}`}
-                                          >
-                                            <CheckCircle className="w-3.5 h-3.5" />
-                                          </button>
-                                        ) : null}
-                                      </div>
-                                    );
-                                  })
-                                )}
-                              </div>
-                            </div>
+                            )}
                           </div>
                         </div>
+
+                        {/* IP Ban & Login Security — tabs, whitelist, bulk actions, filters + CSV */}
+                        <IpBanPanel isDarkMode={isDarkMode} showToast={showToast} />
 
                       </div>
                     )}
@@ -3954,23 +4487,6 @@ export default function Dashboard({
                               </label>
                             </div>
 
-                            {/* Recommended sizes — helps users pick an image that fills
-                                the responsive hero without awkward cropping on any device. */}
-                            <div className={`rounded-xl border p-3 space-y-1.5 ${
-                              isDarkMode ? "border-slate-800 bg-slate-950/40" : "border-slate-200 bg-slate-50"
-                            }`}>
-                              <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                                <Ruler className="w-3 h-3" /> Recommended Size (W × H)
-                              </p>
-                              <ul className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 space-y-1">
-                                <li className="flex justify-between gap-2"><span>Desktop</span><span className="font-mono">1920 × 640 px</span></li>
-                                <li className="flex justify-between gap-2"><span>Tablet</span><span className="font-mono">1024 × 400 px</span></li>
-                                <li className="flex justify-between gap-2"><span>Mobile</span><span className="font-mono">750 × 320 px</span></li>
-                              </ul>
-                              <p className="text-[9px] text-slate-400 leading-relaxed">
-                                Wide landscape banners crop best. The section scales with the screen — a 16:9 or wider image keeps the centre visible on every device.
-                              </p>
-                            </div>
                           </div>
                         </div>
 
@@ -4427,6 +4943,36 @@ export default function Dashboard({
                               <p className="text-[9px] text-slate-400">Comma-separated list of admin emails to receive security alerts</p>
                             </div>
 
+                            {/* Donation emails From identity */}
+                            <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                              <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Donation Emails — From (optional)</label>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <input
+                                    type="text"
+                                    placeholder="From name (e.g. Daily Impact Giving)"
+                                    value={emailConfig.donation?.fromName || ""}
+                                    onChange={(e) => setEmailConfig({ ...emailConfig, donation: { ...emailConfig.donation, fromName: e.target.value } })}
+                                    className={`w-full py-2 pl-3 pr-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
+                                      isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                                    }`}
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <input
+                                    type="email"
+                                    placeholder="From email (e.g. giving@dailyimpact.org)"
+                                    value={emailConfig.donation?.fromEmail || ""}
+                                    onChange={(e) => setEmailConfig({ ...emailConfig, donation: { ...emailConfig.donation, fromEmail: e.target.value } })}
+                                    className={`w-full py-2 pl-3 pr-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
+                                      isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                                    }`}
+                                  />
+                                </div>
+                              </div>
+                              <p className="text-[9px] text-slate-400">Used on donor thank-you receipts. Leave blank to use the main From above. Donors who donate anonymously receive no email.</p>
+                            </div>
+
                             <button
                               type="button"
                               onClick={handleSaveEmailConfig}
@@ -4478,12 +5024,133 @@ export default function Dashboard({
                           <EmailAuditPanel isDarkMode={isDarkMode} showToast={showToast} />
                         </div>
 
+                        {/* Email Templates & Branding — fully customisable + responsive */}
+                        <EmailTemplatesPanel isDarkMode={isDarkMode} showToast={showToast} />
                       </div>
                     )}
 
                     {/* Tab 5: Payments & Donations Settings */}
                     {settingsSubTab === "payments" && (
                       <DonationSettings isDarkMode={isDarkMode} onShowToast={showToast} />
+                    )}
+
+                    {/* Tab 6: Roles & Permissions (Administrator only) */}
+                    {settingsSubTab === "roles" && isAdministrator && (
+                      <div className="space-y-5">
+                        <div className={`p-6 rounded-2xl border ${
+                          isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-900"
+                        }`}>
+                          <div className="flex items-start justify-between gap-4 mb-4">
+                            <div>
+                              <h3 className="font-serif text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                                <ShieldCheck className="w-4 h-4 text-teal-brand" />
+                                Dashboard Access by Role
+                              </h3>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold mt-1.5 leading-relaxed max-w-2xl">
+                                Control which sections each staff role sees when they log in. The Administrator role always has full access and cannot be restricted. Changes apply instantly to the sidebar, mobile navigation, and are enforced on the backend API too.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRolePermDraft(null);
+                                showToast("Changes discarded.", "info");
+                              }}
+                              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider border transition-colors shrink-0 ${
+                                isDarkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-500 hover:bg-slate-100"
+                              }`}
+                            >
+                              Reset Draft
+                            </button>
+                          </div>
+
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse min-w-[720px]">
+                              <thead>
+                                <tr className="border-b border-slate-200 dark:border-slate-800">
+                                  <th className="py-2.5 pr-4 text-[10px] font-black uppercase tracking-wider text-slate-400">Section</th>
+                                  {Object.keys(DEFAULT_ROLE_PERMISSIONS).filter((r) => r !== "Administrator").map((role) => (
+                                    <th key={role} className="py-2.5 px-3 text-center text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                      {role}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {ROLE_SECTIONS.map((sec) => (
+                                  <tr key={sec.key} className="border-b border-slate-100 dark:border-slate-800/60">
+                                    <td className="py-2.5 pr-4 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                      <span className="inline-flex items-center gap-2">
+                                        <span className={`w-1.5 h-1.5 rounded-full ${currentPerms["Assistant Editor"]?.includes(sec.key) || currentPerms["Guest Writer"]?.includes(sec.key) ? "bg-teal-brand" : "bg-slate-300 dark:bg-slate-600"}`} />
+                                        {sec.label}
+                                      </span>
+                                    </td>
+                                    {Object.keys(DEFAULT_ROLE_PERMISSIONS).filter((r) => r !== "Administrator").map((role) => {
+                                      const granted = (currentPerms[role] || []).includes(sec.key);
+                                      return (
+                                        <td key={role} className="py-2.5 px-3 text-center">
+                                          <button
+                                            type="button"
+                                            role="switch"
+                                            aria-checked={granted}
+                                            onClick={() => {
+                                              const base = rolePermDraft ?? rolePermissions;
+                                              const next = { ...base, [role]: granted ? (base[role] || []).filter((k) => k !== sec.key) : [...(base[role] || []), sec.key] };
+                                              setRolePermDraft(next);
+                                            }}
+                                            className={`relative inline-flex items-center h-5 w-9 rounded-full transition-colors duration-200 ${
+                                              granted ? "bg-teal-brand" : "bg-slate-300 dark:bg-slate-700"
+                                            }`}
+                                            title={`${granted ? "Revoke" : "Grant"} ${sec.label} for ${role}`}
+                                          >
+                                            <span className={`inline-block w-3.5 h-3.5 transform rounded-full bg-white shadow transition-transform duration-200 ${granted ? "translate-x-[18px]" : "translate-x-1"}`} />
+                                          </button>
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-5">
+                            <p className="text-[10px] text-slate-400 font-semibold">
+                              Saved as <code className="px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-teal-brand font-mono">role_permissions</code> — back up instantly from Settings.
+                            </p>
+                            <div className="flex items-center gap-2">
+                              {rolePermDraft && (
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">Unsaved changes</span>
+                              )}
+                              <button
+                                type="button"
+                                disabled={rolePermSaving}
+                                onClick={async () => {
+                                  setRolePermSaving(true);
+                                  try {
+                                    await apiPut(`${API_BASE}/settings.php`, {
+                                      role_permissions: JSON.stringify(rolePermDraft ?? rolePermissions),
+                                    });
+                                    setRolePermissions(mergeRolePermissions(rolePermDraft ?? rolePermissions));
+                                    setRolePermDraft(null);
+                                    showToast("Role permissions saved successfully.", "success");
+                                  } catch (err) {
+                                    const msg = err instanceof Error ? err.message : "Unknown error";
+                                    showToast(`Failed to save permissions: ${msg}`, "error");
+                                  } finally {
+                                    setRolePermSaving(false);
+                                  }
+                                }}
+                                className={`py-2 px-5 rounded-xl text-xs font-bold uppercase tracking-wider text-white transition-all ${
+                                  rolePermSaving ? "bg-slate-400 cursor-not-allowed" : "bg-teal-brand hover:opacity-90 active:scale-[0.98]"
+                                }`}
+                              >
+                                {rolePermSaving ? "Saving…" : "Save Permissions"}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     )}
 
                   </div>
@@ -5019,6 +5686,43 @@ export default function Dashboard({
                                       Unschedule
                                     </button>
                                   )}
+                                  {row?.status === "sent" && tgRescheduleId !== row.id && (
+                                    <button
+                                      type="button"
+                                      disabled={busy || tgSchedBusyId !== ""}
+                                      onClick={() => { setTgRescheduleId(row.id); setTgRescheduleTime("06:00"); }}
+                                      className="inline-flex items-center gap-1 py-1.5 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500 hover:text-white transition-all disabled:opacity-40"
+                                    >
+                                      <RefreshCw className="w-3 h-3" />
+                                      Reschedule
+                                    </button>
+                                  )}
+                                  {row?.status === "sent" && tgRescheduleId === row.id && (
+                                    <div className="flex items-center gap-1.5">
+                                      <input
+                                        type="time"
+                                        value={tgRescheduleTime}
+                                        onChange={(e) => setTgRescheduleTime(e.target.value)}
+                                        className="py-1 px-2 rounded-lg border text-[10px] font-mono bg-slate-950 text-emerald-400 border-slate-800"
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={tgSchedBusyId !== ""}
+                                        onClick={() => tgReschedule(row.id)}
+                                        className="py-1.5 px-2.5 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-500 text-white hover:bg-amber-600 transition-all disabled:opacity-40"
+                                      >
+                                        Post again
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setTgRescheduleId(null)}
+                                        className="py-1.5 px-2 rounded-lg text-[10px] font-black uppercase tracking-wider text-slate-400 hover:text-slate-600 transition-colors"
+                                        title="Cancel"
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
                                   <button
                                     type="button"
                                     disabled={busy || tgSchedBusyId !== ""}
@@ -5144,51 +5848,6 @@ export default function Dashboard({
                       </motion.div>
                     </div>
                   )}
-
-                  {/* High Fidelity Technical Architecture Explanation for Backend */}
-                  <div className={`p-6 rounded-2xl border space-y-4 ${
-                    isDarkMode ? "bg-slate-900/50 border-slate-800 text-slate-100" : "bg-slate-50/50 border-slate-200 text-slate-900"
-                  }`}>
-                    <h3 className="font-serif text-sm font-black uppercase tracking-wider text-slate-800 dark:text-white flex items-center gap-2">
-                      <Lock className="w-4 h-4 text-teal-brand" />
-                      PHP API Backend & Database Synchronization Guide
-                    </h3>
-
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs leading-relaxed font-semibold">
-                      
-                      {/* Step 1 */}
-                      <div className="space-y-2">
-                        <span className="text-teal-brand font-black text-sm block">1. Database Storage</span>
-                        <p className="text-slate-500">
-                          When you export this application, you can store your Telegram credentials in your MySQL/PostgreSQL database using PHP. Set up an <code className="font-mono bg-slate-200/50 dark:bg-slate-800 px-1 rounded text-[10px]">integrations</code> table to persist the Bot Token and Channel ID.
-                        </p>
-                      </div>
-
-                      {/* Step 2 */}
-                      <div className="space-y-2">
-                        <span className="text-teal-brand font-black text-sm block">2. Telegram API Script</span>
-                        <p className="text-slate-500">
-                          Write a lightweight PHP endpoint using <code className="font-mono bg-slate-200/50 dark:bg-slate-800 px-1 rounded text-[10px]">curl</code>. The script compiles the title, reading, body, and issues a multipart request to <code className="font-mono bg-slate-200/50 dark:bg-slate-800 px-1 rounded text-[10px]">sendPhoto</code> to post the image cover and captions together!
-                        </p>
-                      </div>
-
-                      {/* Step 3 */}
-                      <div className="space-y-2">
-                        <span className="text-teal-brand font-black text-sm block">3. Cron Job Scheduler</span>
-                        <p className="text-slate-500">
-                          To support daily automatic schedules without keeping your browser open, configure a 1-minute system <b>cron job</b> on your web server pointing to your PHP broadcast agent script.
-                        </p>
-                      </div>
-
-                    </div>
-
-                    <div className="pt-2">
-                      <p className="text-[10px] text-slate-400 leading-normal font-semibold">
-                        💡 <b>Refer to the file:</b> <code className="font-mono px-1 rounded bg-slate-200/50 dark:bg-slate-800 text-[9px]">TELEGRAM_INTEGRATION_GUIDE.md</code> located in your workspace root directory for complete PHP code templates, database table structures, security recommendations, and cron configurations!
-                      </p>
-                    </div>
-
-                  </div>
 
                 </div>
               )}

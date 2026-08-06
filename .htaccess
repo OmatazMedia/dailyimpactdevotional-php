@@ -16,6 +16,19 @@ RewriteEngine On
 # Deny access to the config directory (db.php holds credentials).
 RewriteRule ^backend/config/ - [F,L]
 
+# ─── SECURITY HEADERS ───────────────────────────────────────────────────────
+# Clickjacking, MIME-sniffing, referrer leakage, and a conservative CSP that
+# blocks framing + plugin objects without breaking the SPA (resource
+# directives are intentionally NOT set here).
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=()"
+    Header always set X-Download-Options "noopen"
+    Header always set Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
+</IfModule>
+
 # Deny the docs folder (markdown guides, setup notes).
 RewriteRule ^docs/ - [F,L]
 

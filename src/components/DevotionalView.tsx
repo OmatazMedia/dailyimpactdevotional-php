@@ -5,6 +5,7 @@ import { BookOpen, Sparkles, ChevronLeft, ChevronRight, Book, Quote, Share2, X, 
 import TtsPlayerModal from "./TtsPlayerModal";
 import { motion, AnimatePresence } from "motion/react";
 import { buildHeaderMap, normalizeHeaderKey, HeaderMappingRow } from "../lib/headers";
+import { slugForDevotional } from "../lib/devotionalSlug";
 
 interface DevotionalViewProps {
   devotional: Devotional;
@@ -120,9 +121,14 @@ export default function DevotionalView({
       .catch(() => {});
   };
 
+  // Share URL uses the devotional's date as a human-friendly slug
+  // (5-aug-2025) instead of the random UUID — falls back to the id for
+  // legacy rows whose date can't be parsed.
+  const shareSlug = slugForDevotional(devotional.date, devotional.year) || devotional.id;
+  const shareUrl = `${window.location.origin}?devotional=${shareSlug}`;
+
   const handleCopyLink = () => {
-    const pageUrl = `${window.location.origin}?devotional=${devotional.id}`;
-    navigator.clipboard.writeText(pageUrl);
+    navigator.clipboard.writeText(shareUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -473,19 +479,18 @@ export default function DevotionalView({
         isDarkMode={isDarkMode}
       />
 
-      {/* Specified Devotional Banner Image — fills the section automatically
-          for ANY uploaded image (landscape, portrait or square): the fixed
-          aspect-ratio box is the reserved space, and object-contain fits the
-          ENTIRE image inside without cutting off any part (no cropping). */}
+      {/* Specified Devotional Banner Image — displayed at its NATIVE size
+          (e.g. a 1920×300 upload): the image fills the full content width and
+          its height follows the image's own aspect ratio, so NOTHING is
+          cropped. On smaller screens it scales down responsively, end to end,
+          instead of being cover-cropped into a fixed banner box. */}
       <div className="w-full mb-8 rounded-2xl md:rounded-3xl overflow-hidden shadow-lg border border-slate-200 dark:border-slate-800/80 group bg-slate-100 dark:bg-slate-950/60">
-        <div className="relative w-full aspect-[16/9] sm:aspect-[21/9] md:aspect-[24/9] lg:aspect-[28/9] min-h-[180px] max-h-[460px] overflow-hidden flex items-center justify-center">
-          <img
-            src={activeImageUrl || "/assets/images/devotional-title-jan.jpg"}
-            alt="Daily Impact Devotional Title Banner"
-            className="w-full h-full object-cover object-center transition-transform duration-700 ease-out group-hover:scale-[1.015]"
-            referrerPolicy="no-referrer"
-          />
-        </div>
+        <img
+          src={activeImageUrl || "/assets/images/devotional-title-jan.jpg"}
+          alt="Daily Impact Devotional Title Banner"
+          className="block w-full h-auto transition-transform duration-700 ease-out group-hover:scale-[1.015]"
+          referrerPolicy="no-referrer"
+        />
       </div>
 
       {/* Styled Scripture Section with Icons - Monochrome, Justified */}
@@ -761,7 +766,7 @@ export default function DevotionalView({
                   <div className="grid grid-cols-2 gap-3">
                     {/* WhatsApp */}
                     <a
-                      href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 150) : ""}...\n\nRead more at: ${window.location.origin}?devotional=${devotional.id}`)}`}
+                      href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 150) : ""}...\n\nRead more at: ${shareUrl}`)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-2.5 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 hover:bg-emerald-500/10 hover:border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs font-bold transition-all"
@@ -774,7 +779,7 @@ export default function DevotionalView({
 
                     {/* Facebook */}
                     <a
-                      href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(`${window.location.origin}?devotional=${devotional.id}`)}&quote=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 150) : ""}`)}`}
+                      href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(`${shareUrl}`)}&quote=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 150) : ""}`)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-2.5 p-3 rounded-xl border border-blue-500/20 bg-blue-500/5 hover:bg-blue-500/10 hover:border-blue-500/30 text-blue-600 dark:text-blue-400 text-xs font-bold transition-all"
@@ -787,7 +792,7 @@ export default function DevotionalView({
 
                     {/* Twitter/X */}
                     <a
-                      href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 120) : ""}...\n\n`)}&url=${encodeURIComponent(`${window.location.origin}?devotional=${devotional.id}`)}`}
+                      href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 120) : ""}...\n\n`)}&url=${encodeURIComponent(`${shareUrl}`)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-500/20 bg-slate-500/5 hover:bg-slate-500/10 hover:border-slate-500/30 text-slate-800 dark:text-slate-200 text-xs font-bold transition-all"
@@ -800,7 +805,7 @@ export default function DevotionalView({
 
                     {/* Telegram */}
                     <a
-                      href={`https://t.me/share/url?url=${encodeURIComponent(`${window.location.origin}?devotional=${devotional.id}`)}&text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 120) : ""}...`)}`}
+                      href={`https://t.me/share/url?url=${encodeURIComponent(`${shareUrl}`)}&text=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 120) : ""}...`)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-2.5 p-3 rounded-xl border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/10 hover:border-sky-500/30 text-sky-600 dark:text-sky-400 text-xs font-bold transition-all"
@@ -837,7 +842,7 @@ export default function DevotionalView({
 
                     {/* Email Share */}
                     <a
-                      href={`mailto:?subject=${encodeURIComponent(devotional.title)}&body=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 200) : ""}...\n\nRead full devotional at: ${window.location.origin}?devotional=${devotional.id}`)}`}
+                      href={`mailto:?subject=${encodeURIComponent(devotional.title)}&body=${encodeURIComponent(`"${devotional.title}"\n\n${devotional.paragraphs && devotional.paragraphs[0] ? devotional.paragraphs[0].slice(0, 200) : ""}...\n\nRead full devotional at: ${shareUrl}`)}`}
                       className="flex items-center justify-center gap-2 py-3 px-5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-serif font-black uppercase tracking-widest transition-all text-slate-700 dark:text-slate-300"
                     >
                       <Mail className="w-4 h-4" />

@@ -125,9 +125,11 @@ foreach ($dueRows as $row) {
 
     $imageUrl = resolveImageUrl($dev);
     $photoCaption = "<i>📖 " . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n<b>" . tgEscape($dev['title']) . "</b>";
-    $bodyText = buildDevotionalBody($dev, $footerText);
 
     $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
+    // Body starts at the Scripture section; the date + title header is only
+    // re-added if the photo (which carried them in its caption) failed to post.
+    $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
     $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
 
     $finalSuccess = $textResult['success'] || $photoResult['success'];
@@ -190,9 +192,11 @@ if ($posted === 0 && ($settings['telegram_schedule_mode'] ?? 'scheduled') === 's
             if ($dev) {
                 $imageUrl = resolveImageUrl($dev);
                 $photoCaption = "<i>📖 " . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n<b>" . tgEscape($dev['title']) . "</b>";
-                $bodyText = buildDevotionalBody($dev, $footerText);
 
                 $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
+                // Body starts at the Scripture section; the date + title header
+                // is only re-added if the photo failed to post.
+                $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
                 $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
 
                 $finalSuccess = $textResult['success'] || $photoResult['success'];

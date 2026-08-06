@@ -263,6 +263,11 @@ export default function DonateModal({ isOpen, onClose, isDarkMode, onDonationCom
 
     setLoading(true);
     try {
+      // The backend creates a PENDING donation and initializes the configured
+      // gateway (Paystack / Flutterwave) with its secret key. It returns a
+      // hosted authorization URL — we redirect the donor there. The status is
+      // NEVER set from the client; it only becomes success after the gateway
+      // verifies the payment (webhook or the ?donation= redirect callback).
       const res = await fetch(`${API_BASE}/donations.php`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -273,23 +278,31 @@ export default function DonateModal({ isOpen, onClose, isDarkMode, onDonationCom
           name: form.anonymous ? "" : cleanName,
           phone: form.anonymous ? "" : cleanPhone,
           provider: gateway,
-          status: "success",
           is_anonymous: form.anonymous,
-          reference: `DID-${Date.now()}`,
         }),
       });
-      if (!res.ok) throw new Error("Failed to save donation");
-      await res.json();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        authorization_url?: string;
+        reference?: string;
+        status?: string;
+      };
 
-      // Hand off to the App-level celebration page.
-      onDonationComplete({
-        name: form.anonymous ? "" : cleanName,
-        amount: Number(activeAmount || 0),
-        currency,
-        anonymous: form.anonymous,
-      });
-    } catch {
-      setErrors({ email: "Unable to create your donation request right now. Please try again." });
+      if (data.authorization_url) {
+        // Redirect to the gateway's hosted checkout. The donor returns to
+        // /?donation=<reference> where App.tsx verifies and celebrates.
+        window.location.href = data.authorization_url;
+        return;
+      }
+
+      // No authorization URL (unexpected) — treat as failure.
+      setErrors({ email: "The payment gateway did not return a checkout link. Please try again." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setErrors({ email: msg || "Unable to create your donation request right now. Please try again." });
     } finally {
       setLoading(false);
     }

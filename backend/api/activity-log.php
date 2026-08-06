@@ -13,7 +13,7 @@
 
 require_once __DIR__ . '/../config/db.php';
 sendCorsHeaders();
-requireAdmin();
+requireSection('overview');
 ensureActivityTables();
 
 $limit = isset($_GET['limit']) ? max(1, min(200, (int)$_GET['limit'])) : 50;

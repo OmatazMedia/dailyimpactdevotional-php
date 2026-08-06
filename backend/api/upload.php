@@ -30,8 +30,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// Require admin auth
-requireAdmin();
+// Require admin auth (uploads serve header images + settings branding assets)
+requireAnySection(['header-images', 'settings']);
 
 header('Content-Type: application/json; charset=utf-8');
 

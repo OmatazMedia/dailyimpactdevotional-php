@@ -1,0 +1,24 @@
+# Daily Impact Devotional — harden the upload folder.
+# Uploaded files must NEVER be executed as scripts, even if a filename slips
+# through (defense-in-depth on top of the extension/MIME allowlist in upload.php).
+# Also disable directory listing so filenames stay private.
+
+<IfModule mod_authz_core.c>
+    # Apache 2.4+
+    <FilesMatch "\.(?i:php|php3|php4|php5|php7|php8|phtml|phar|cgi|pl|py|sh|asp|aspx|jsp)$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+<IfModule !mod_authz_core.c>
+    # Apache 2.2
+    <FilesMatch "\.(?i:php|php3|php4|php5|php7|php8|phtml|phar|cgi|pl|py|sh|asp|aspx|jsp)$">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+
+Options -ExecCGI -Indexes

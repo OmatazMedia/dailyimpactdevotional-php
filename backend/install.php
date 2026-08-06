@@ -112,13 +112,50 @@ foreach ($checks as $c) {
     if (isset($c['pass']) && !$c['pass']) $allPreflightPass = false;
 }
 
+// ─── Installed-Lock (security) ──────────────────────────────────────────────
+// Once the database has at least one admin account, the installer refuses to
+// run again. This blocks the takeover vector where someone re-runs install.php
+// to reset the admin password or inject a brand-new admin account.
+// Credentials are read from the existing config WITHOUT executing it, so a
+// broken/unreachable DB never crashes the installer.
+$alreadyInstalled = false;
+if (file_exists($configFile)) {
+    $cfg = (string)@file_get_contents($configFile);
+    $cred = static function (string $var) use ($cfg): string {
+        if (preg_match('/\$' . preg_quote($var, '/') . '\s*=\s*[\'"]([^\'"]*)[\'"]\s*;/', $cfg, $m)) {
+            return $m[1];
+        }
+        return '';
+    };
+    $h = $cred('db_host'); $n = $cred('db_name'); $u = $cred('db_user'); $p = $cred('db_pass');
+    if ($h !== '' && $u !== '') {
+        try {
+            $probe = new PDO("mysql:host={$h};dbname={$n};charset=utf8mb4", $u, $p, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_TIMEOUT => 3,
+            ]);
+            $probe->query('SELECT 1');
+            $adminCount = (int)$probe->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
+            if ($adminCount > 0) {
+                $alreadyInstalled = true;
+            }
+        } catch (Throwable $e) {
+            // DB unreachable or admin_users missing — treat as fresh/partial install.
+        }
+    }
+}
+
 // ─── AJAX detection ───────────────────────────────────────────────────────
 $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
 // ─── Handle Form Submission ────────────────────────────────────────────────
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!$allPreflightPass) {
+    if ($alreadyInstalled) {
+        // Locked: never allow a re-run to overwrite the admin account.
+        $error = 'This site is already installed. The installer is locked for security — delete backend/install.php from the server.';
+        if ($isAjax) { header('Content-Type: application/json'); echo json_encode(['success'=>false,'message'=>$error]); exit; }
+    } elseif (!$allPreflightPass) {
         $error = 'Pre-flight checks failed. Fix the ❌ items above and refresh.';
         if ($isAjax) { header('Content-Type: application/json'); echo json_encode(['success'=>false,'message'=>$error]); exit; }
     } else {
@@ -648,6 +685,29 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
             <a href="<?= $backendUrl ?>/debug.php" class="btn btn-outline btn-sm">🩺 Diagnostics</a>
         </div>
         <p class="note mt-3">⚠️ Delete <code>install.php</code> from your server now.</p>
+    </div>
+
+<?php elseif ($alreadyInstalled): ?>
+
+    <!-- ═══ LOCKED: ALREADY INSTALLED ═══ -->
+    <div class="card" style="text-align:center;">
+        <div style="font-size:3rem; margin-bottom:0.75rem;">🔒</div>
+        <h1 style="background:none; -webkit-text-fill-color:unset; color:#f8fafc;">Installer Locked</h1>
+        <p style="color:#94a3b8; margin:0.75rem 0 1rem; font-size:0.9rem;">
+            This site has already been installed. To protect the administrator account,
+            the installer will not run again.
+        </p>
+        <div class="warn-box" style="text-align:left;">
+            ⚠️ For security, delete <code>backend/install.php</code> from your server.
+        </div>
+        <?php
+        $lockScriptDir = dirname($_SERVER['SCRIPT_NAME']);
+        $lockAppRoot = $lockScriptDir === '/' ? '' : rtrim(dirname($lockScriptDir), '/');
+        ?>
+        <div class="flex">
+            <a href="<?= $lockAppRoot ?>/" class="btn btn-primary btn-sm">🏠 Go to Homepage</a>
+            <a href="<?= $lockAppRoot ?>/admin/login" class="btn btn-success btn-sm">🔐 Admin Login</a>
+        </div>
     </div>
 
 <?php else: ?>

@@ -88,12 +88,23 @@ switch ($method) {
         break;
 
     case 'PUT':
-        requireAdmin();
+        // settings.php is a shared write path used by MANY tabs (Telegram
+        // config, profile, branding assets, payments) — so any authenticated
+        // admin with at least one granted section may save their tab's keys.
+        // The only key restricted to the Administrator role is
+        // 'role_permissions' (guarded below), so role control is not bypassable.
+        requireAnySection(array_keys(roleSections()));
         // PUT /api/settings - Merge provided settings
         $input = jsonInput();
 
         if (empty($input)) {
             jsonError('No settings provided');
+        }
+
+        // Only the Administrator may change role permissions. This check runs
+        // before any write so a restricted role cannot self-elevate.
+        if (array_key_exists('role_permissions', $input) && currentAdminRole() !== 'Administrator') {
+            jsonError('Access denied: only the Administrator can change role permissions.', 403);
         }
 
         $stmt = $pdo->prepare(

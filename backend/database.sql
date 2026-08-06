@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS `donations` (
     `provider` VARCHAR(50) DEFAULT 'paystack',
     `status` ENUM('success', 'pending', 'failed') DEFAULT 'pending',
     `donated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_reference` (`reference`),
+    UNIQUE KEY `uk_reference` (`reference`),
     INDEX `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -81,8 +81,14 @@ CREATE TABLE IF NOT EXISTS `admin_users` (
     `email` VARCHAR(255) NOT NULL UNIQUE,
     `password_hash` VARCHAR(255) NOT NULL,
     `name` VARCHAR(255),
+    `bio` TEXT NULL COMMENT 'Staff profile bio (per user — NOT the public author bio)',
     `role` VARCHAR(50) NOT NULL DEFAULT 'admin',
     `status` VARCHAR(20) NOT NULL DEFAULT 'Active',
+    `totp_secret` VARCHAR(255) NOT NULL DEFAULT '',
+    `totp_enabled` TINYINT(1) NOT NULL DEFAULT 0,
+    `email_otp_enabled` TINYINT(1) NOT NULL DEFAULT 0,
+    `backup_codes` TEXT NULL,
+    `session_version` INT NOT NULL DEFAULT 0 COMMENT 'Bump to force-log-out all sessions for this user',
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -108,6 +114,7 @@ CREATE TABLE IF NOT EXISTS `mail_queue` (
     `to_email` VARCHAR(255) NOT NULL,
     `subject` VARCHAR(500),
     `body` LONGTEXT,
+    `html` MEDIUMTEXT NULL COMMENT 'Branded HTML body (rendered from email templates)',
     `sent` TINYINT(1) DEFAULT 0,
     `sent_at` TIMESTAMP NULL,
     `error` TEXT,
@@ -127,10 +134,11 @@ CREATE TABLE IF NOT EXISTS `ip_bans` (
     `email` VARCHAR(255) DEFAULT '',
     `failed_attempts` INT DEFAULT 0,
     `active` TINYINT(1) DEFAULT 1,
+    `whitelisted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = admin-whitelisted; never auto-banned, skips ban checks',
     `unbanned_at` TIMESTAMP NULL,
     `unbanned_by` VARCHAR(255) DEFAULT NULL,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY `uk_cidr_active` (`cidr`, `active`),
+    UNIQUE KEY `uk_cidr` (`cidr`),
     INDEX `idx_active` (`active`),
     INDEX `idx_ip_address` (`ip_address`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -153,6 +161,14 @@ CREATE TABLE IF NOT EXISTS `uploaded_files` (
 
 -- Real-time administrative activity feed (populated by logActivity() in
 -- config/db.php from the admin/devotionals/headers/telegram endpoints).
+-- Payment-webhook flood guard (throttles rogue clients; gateways retry safely).
+CREATE TABLE IF NOT EXISTS `webhook_events` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `ip_address` VARCHAR(45) NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_wh_ip_time` (`ip_address`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `activity_log` (
     `id` VARCHAR(36) PRIMARY KEY,
     `action` VARCHAR(50) NOT NULL,

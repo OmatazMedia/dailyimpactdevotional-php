@@ -328,12 +328,16 @@ export default function ImportDevotional({
       //    Could also be TWO scripture lines before the body starts.
       const VERSE_SUFFIX_RE = /[\u2013\u2014\u2012-]\s*(?:\d+\s+)?(?:[A-Z][a-z]+\s+)+\d+[:]\d+/;
       const TRANSLATION_RE  = /\((NKJV|NIV|AMP|KJV|ESV|NLT|MSG|NRSV|RSV|CEV|TLB|GNB|NASB|ISV|WEB|TEV)\)/i;
+      // A standalone book reference at the start of the line, e.g.
+      // "Psalm 23:1, 5 (NKJV)" or "2 Corinthians 5:17". The dash is optional
+      // because some imports put the reference on its own line without one.
+      const STANDALONE_REF_RE = /^(?:\d+\s+)?[A-Z][a-zA-Z]+\s+\d+\s*:\s*\d+/;
       const SCRIPTURE_LINE_RE = /[\u2013\u2014-]|NKJV|NIV|AMP|KJV|ESV|NLT|MSG|NRSV|Psalm|Proverbs|John|Romans|Isaiah|Matthew|Luke|Acts|Genesis|Philippians|Ephesians|Colossians|Timothy|Corinthians|Hebrews|James|Peter|Revelation/i;
 
       const isScriptureLine = (l: string): boolean => {
         const t = l.trim();
         if (!t) return false;
-        return VERSE_SUFFIX_RE.test(t) || TRANSLATION_RE.test(t);
+        return VERSE_SUFFIX_RE.test(t) || TRANSLATION_RE.test(t) || STANDALONE_REF_RE.test(t);
       };
 
       // Collect up to 2 consecutive scripture lines right after title
@@ -354,26 +358,44 @@ export default function ImportDevotional({
         }
       }
 
-      // Parse anchor scripture text + ref from scriptureRaw
+      // Parse anchor scripture text + ref from scriptureRaw.
+      // A book reference is: optional leading number ("2 Corinthians"), book
+      // name, chapter:verse, a verse list ("1, 5" / "1-6" / "1, 3-5") and an
+      // optional translation in parentheses — "Psalm 23:1, 5 (NKJV)". The
+      // verse list is the part the old regex choked on (", 5" broke the
+      // `(?:[-]\d+)?`), leaving the ref glued to the passage and a literal
+      // "Scripture Reference" placeholder in its place.
+      const VERSE_REF_RE = /(?:\d+\s+)?[A-Z][a-zA-Z\s]+\d+\s*:\s*\d+(?:[,\-\s]+\d+)*(?:\s*\([^)]+\))?/;
       let scriptureText = scriptureRaw;
       let scriptureRef  = "";
       if (scriptureRaw) {
-        // Split on dash/emdash before book reference
-        const sepMatch = scriptureRaw.match(/^(.*?)\s*[\u2013\u2014\u2012-]\s*((?:\d+\s+)?[A-Z][a-zA-Z\s]+\d+[:]\d+(?:[-]\d+)?(?:\s*\([^)]+\))?)\s*$/);
-        if (sepMatch) {
-          scriptureText = sepMatch[1].replace(/^["'"'\s]+|["'"'\s]+$/g, "").trim();
-          scriptureRef  = sepMatch[2].trim();
+        // 1) Split at the dash/em-dash immediately before the book ref:
+        //    "passage … — Psalm 23:1, 5 (NKJV)" → text + "Psalm 23:1, 5 (NKJV)".
+        const sepIdx = scriptureRaw.search(/[\u2013\u2014\u2012-]\s*(?=(?:\d+\s+)?[A-Z][a-zA-Z]+\s*\d+\s*:\s*\d+)/);
+        if (sepIdx >= 0) {
+          scriptureText = scriptureRaw.slice(0, sepIdx).replace(/^["'"'“”\s]+|["'"'“”\s]+$/g, "").trim();
+          scriptureRef  = scriptureRaw.slice(sepIdx).replace(/^[\u2013\u2014\u2012-\s]+/, "").trim();
         } else {
-          // Try to find translation token and extract ref from end
-          const transMatch = scriptureRaw.match(/^(.*?)\s+((?:\d+\s+)?[A-Z][a-zA-Z\s]*\d+[:]\d+[-\d]*\s*\([^)]+\))\s*$/);
-          if (transMatch) {
-            scriptureText = transMatch[1].replace(/^["'"'\s]+|["'"'\s]+$/g, "").trim();
-            scriptureRef  = transMatch[2].trim();
+          const t = scriptureRaw.trim();
+          // 2) The whole line is just the reference ("Psalm 23:1, 5 (NKJV)").
+          if (new RegExp(`^${VERSE_REF_RE.source}$`).test(t)) {
+            scriptureRef = t;
+            scriptureText = "";
+          } else {
+            // 3) Ref appended with a plain space and no dash:
+            //    "passage … Psalm 23:1, 5 (NKJV)".
+            const m = scriptureRaw.match(new RegExp(`^(.*?)\s+(${VERSE_REF_RE.source})\s*$`));
+            if (m && m[2] !== t) {
+              scriptureText = m[1].replace(/^["'"'“”\s]+|["'"'“”\s]+$/g, "").trim();
+              scriptureRef  = m[2].trim();
+            }
           }
         }
       }
-      if (!scriptureRef) scriptureRef = "Scripture Reference";
-      if (!scriptureText) scriptureText = scriptureRaw || "Scripture Passage";
+      // Empty ref stays empty — never show a literal "Scripture Reference"
+      // placeholder; the reader-facing UI hides an empty reference. Only fall
+      // back to the raw line when neither text nor ref was extracted.
+      if (!scriptureText && !scriptureRef) scriptureText = scriptureRaw || "";
 
       // ── Find section-label line indices ───────────────────────────────────
       let addScripIdx = -1;

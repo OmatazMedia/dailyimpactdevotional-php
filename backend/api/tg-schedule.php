@@ -83,6 +83,34 @@ function tgUnscheduleDevotionals(array $devotionalIds): int {
 }
 
 /**
+ * Re-schedule an EXISTING telegram_log row (including already-SENT ones) at a
+ * new post time / date. Flips it back to 'scheduled' so the cron posts it
+ * again — used by the "Reschedule" action on sent broadcasts.
+ *
+ * @return bool true when the row was updated
+ */
+function tgReschedule(string $rowId, string $postTime, ?string $scheduledDate = null, ?int $year = null): bool
+{
+    global $pdo;
+    if (!$pdo instanceof PDO || $rowId === '') return false;
+    // Validate HH:MM
+    if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $postTime)) return false;
+    try {
+        $stmt = $pdo->prepare(
+            "UPDATE telegram_log
+             SET post_time = ?, scheduled_date = COALESCE(?, scheduled_date),
+                 scheduled_year = COALESCE(?, scheduled_year),
+                 status = 'scheduled', sent_at = NULL, error = NULL
+             WHERE id = ?"
+        );
+        $stmt->execute([$postTime, $scheduledDate, $year, $rowId]);
+        return $stmt->rowCount() > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/**
  * List telegram_log rows for a month/year (all statuses), newest schedule
  * first, mapped to the camelCase shape the frontend expects.
  */

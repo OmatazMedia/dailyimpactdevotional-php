@@ -72,10 +72,36 @@ try {
 
 // ─── CORS Headers ───────────────────────────────────────────────────────────
 function sendCorsHeaders(): void {
-    header('Access-Control-Allow-Origin: *');
+    // CORS: only reflect an Origin that matches this site (or local dev), never
+    // a wildcard — a wildcard would let ANY website read API responses and ride
+    // cookie-authenticated requests. Same-origin requests (the normal case) are
+    // unaffected.
+    $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
+    $host   = (string)($_SERVER['HTTP_HOST'] ?? '');
+    if ($origin !== '') {
+        // Vary on Origin whenever an Origin is present (cache correctness).
+        header('Vary: Origin');
+        $oHost = (string)parse_url($origin, PHP_URL_HOST);
+        $hostNoPort = preg_replace('/:\d+$/', '', $host);
+        // The localhost carve-out is dev convenience only; it is safe because
+        // the session cookie is SameSite=Lax (withheld on cross-site fetch).
+        // If a cookie ever becomes SameSite=None or a Bearer token is added,
+        // remove the $isLocal allowance.
+        $isLocal = (bool)preg_match('/^(localhost|127\.0\.0\.1|\[::1\])$/i', $oHost);
+        if ($oHost !== '' && ($isLocal || ($hostNoPort !== null && strcasecmp($oHost, $hostNoPort) === 0))) {
+            header('Access-Control-Allow-Origin: ' . $origin);
+            header('Access-Control-Allow-Credentials: true');
+        }
+    }
     header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
     header('Access-Control-Allow-Headers: Content-Type, Authorization');
     header('Content-Type: application/json; charset=utf-8');
+
+    // Hardening headers — clickjacking, MIME sniffing, referrer leakage.
+    header('X-Frame-Options: SAMEORIGIN');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()');
 
     // API responses must never be cached by the browser/proxy — otherwise a
     // stale GET /devotionals.php response can resurrect a row the admin just
@@ -86,6 +112,56 @@ function sendCorsHeaders(): void {
     if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
         http_response_code(200);
         exit;
+    }
+}
+
+// ─── Webhook Flood Guard ────────────────────────────────────────────────────
+// Payment gateways retry webhooks; forged/rogue clients should be throttled.
+// Signature verification (webhook-payment.php) is the PRIMARY control — this
+// guard is defense-in-depth and best-effort (never blocks on guard errors).
+function ensureWebhookGuard(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS webhook_events (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            ip_address VARCHAR(45) NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_wh_ip_time (ip_address, created_at)
+        ) ENGINE=InnoDB");
+    } catch (Throwable $e) {
+        // Non-fatal — the guard is best-effort.
+    }
+}
+
+function webhookAllowed(string $ip, int $maxPerMinute = 15): bool {
+    global $pdo;
+    if ($ip === '' || !$pdo instanceof PDO) {
+        return true;
+    }
+    try {
+        // Prune old rows, then count this IP's requests in the last minute.
+        $pdo->exec("DELETE FROM webhook_events WHERE created_at < NOW() - INTERVAL 10 MINUTE");
+        $stmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM webhook_events
+             WHERE ip_address = ? AND created_at >= NOW() - INTERVAL 1 MINUTE"
+        );
+        $stmt->execute([$ip]);
+        if ((int)$stmt->fetchColumn() >= $maxPerMinute) {
+            return false;
+        }
+        $ins = $pdo->prepare("INSERT INTO webhook_events (ip_address) VALUES (?)");
+        $ins->execute([$ip]);
+        return true;
+    } catch (Throwable $e) {
+        return true; // Fail-open only on guard errors — signature check still protects.
     }
 }
 
@@ -171,6 +247,126 @@ function requireAdmin(): void {
     // Use secureSession() for consistent session handling (configure, timeout check, IP binding)
     if (!secureSession()) {
         jsonError('Unauthorized. Please log in first.', 401);
+    }
+}
+
+// ─── Roles & Permissions ────────────────────────────────────────────────────
+// The Administrator can restrict which dashboard sections each staff role
+// (Assistant Editor / Guest Writer) can see. Permissions are stored as JSON in
+// the settings table under the key 'role_permissions'. The Administrator role
+// ALWAYS has full access and cannot be restricted server-side.
+
+/** All dashboard sections that can be granted per role (key => display name). */
+function roleSections(): array {
+    return [
+        'overview'             => 'Overview Console',
+        'add-devotional'       => 'Add Devotional',
+        'manage-devotionals'   => 'List Devotionals',
+        'import-devotional'    => 'Import Devotional',
+        'header-images'        => 'Header Images',
+        'user-management'      => 'User Management',
+        'telegram-integration' => 'Telegram Channel',
+        'foreword'             => 'Foreword',
+        'payments'             => 'Payments & Donations',
+        'analytics'            => 'Website Analytics',
+        'settings'             => 'Settings',
+    ];
+}
+
+/** Default permission matrix used when nothing has been saved yet. */
+function defaultRolePermissions(): array {
+    $all = array_keys(roleSections());
+    return [
+        'Administrator'    => $all,
+        'Assistant Editor' => ['overview', 'add-devotional', 'manage-devotionals', 'import-devotional', 'header-images', 'foreword', 'telegram-integration', 'analytics'],
+        'Guest Writer'     => ['overview', 'add-devotional', 'manage-devotionals', 'import-devotional'],
+    ];
+}
+
+/** Load saved role permissions, merged over the defaults (missing roles/sections keep defaults). */
+function getRolePermissions(): array {
+    requireDb();
+    $defaults = defaultRolePermissions();
+    $sections = array_keys(roleSections());
+    try {
+        $saved = json_decode((string)getSetting('role_permissions', ''), true);
+    } catch (Throwable $e) {
+        // Settings table may not exist yet on a partially-migrated DB — fall
+        // back to the defaults rather than surfacing a 500.
+        return $defaults;
+    }
+    if (!is_array($saved)) {
+        return $defaults;
+    }
+    $result = [];
+    foreach ($defaults as $role => $allowed) {
+        $list = $saved[$role] ?? $allowed;
+        if (!is_array($list)) {
+            $list = $allowed;
+        }
+        // Only keep known sections; Administrator is always unrestricted.
+        if ($role === 'Administrator') {
+            $result[$role] = $sections;
+        } else {
+            $result[$role] = array_values(array_intersect($list, $sections));
+        }
+    }
+    return $result;
+}
+
+/** Normalize a DB role value to the display string used across the app. */
+function normalizeRole(string $role): string {
+    $r = strtolower(trim($role));
+    if ($r === 'admin') return 'Administrator';
+    if ($r === 'editor') return 'Assistant Editor';
+    if ($r === 'guest') return 'Guest Writer';
+    return $role;
+}
+
+/** The normalized role of the currently logged-in admin ('' when anonymous). */
+function currentAdminRole(): string {
+    if (empty($_SESSION['admin_role'])) {
+        return '';
+    }
+    return normalizeRole((string)$_SESSION['admin_role']);
+}
+
+/** Whether the current admin role may see a given dashboard section. */
+function canAccessSection(string $section): bool {
+    $role = currentAdminRole();
+    if ($role === 'Administrator') {
+        return true;
+    }
+    if ($role === '') {
+        return false;
+    }
+    $perms = getRolePermissions();
+    return in_array($section, $perms[$role] ?? [], true);
+}
+
+/** Can the current role see ANY of the given sections? (e.g. devotional writes.) */
+function canAccessAnySection(array $sections): bool {
+    foreach ($sections as $s) {
+        if (canAccessSection($s)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** requireAdmin() + section permission gate (403 when the role lacks access). */
+function requireSection(string $section): void {
+    requireAdmin();
+    if (!canAccessSection($section)) {
+        jsonError('Access denied: your role cannot view this section.', 403);
+    }
+}
+
+/** requireAdmin() + ANY-of gate — used where one endpoint backs several tabs. */
+function requireAnySection(array $sections): void {
+    requireAdmin();
+    if (!canAccessAnySection($sections)) {
+        jsonError('Access denied: your role cannot perform this action.', 403);
     }
 }
 
@@ -329,15 +525,21 @@ function encryptSecret(string $plain): string {
     $iv  = random_bytes(16);
     $cipher = openssl_encrypt($plain, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
     if ($cipher === false) {
-        // openssl missing — store plaintext rather than lose the value.
-        return $plain;
+        // openssl missing — never silently downgrade. Mark the value explicitly
+        // and log loudly so the ops team knows secrets are NOT encrypted at rest.
+        error_log('CRYPTO WARNING: openssl_encrypt failed — storing secret with plain: marker (not encrypted at rest).');
+        return 'plain:' . $plain;
     }
     return 'enc:v1:' . base64_encode($iv . $cipher);
 }
 
-/** Decrypt a stored secret. Handles plaintext (legacy) and empty values. */
+/** Decrypt a stored secret. Handles plaintext (legacy), explicit plain: markers and empty values. */
 function decryptSecret(string $stored): string {
     if ($stored === '' || !str_starts_with($stored, 'enc:v1:')) {
+        // Explicit plaintext marker (crypto downgrade) — strip the prefix.
+        if (str_starts_with($stored, 'plain:')) {
+            return substr($stored, 6);
+        }
         return $stored; // empty or legacy plaintext
     }
     $raw = base64_decode(substr($stored, 7), true);
@@ -532,18 +734,80 @@ function ensureBanTable(): void {
                 email VARCHAR(255) DEFAULT '',
                 failed_attempts INT DEFAULT 0,
                 active TINYINT(1) DEFAULT 1,
+                whitelisted TINYINT(1) NOT NULL DEFAULT 0,
                 unbanned_at TIMESTAMP NULL,
                 unbanned_by VARCHAR(255) DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uk_cidr_active (cidr, active),
+                UNIQUE KEY uk_cidr (cidr),
                 INDEX idx_active (active),
                 INDEX idx_ip_address (ip_address)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
+        // Add the whitelisted column on existing installs (idempotent).
+        $bCols = $pdo->query("SHOW COLUMNS FROM ip_bans")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('whitelisted', $bCols, true)) {
+            $pdo->exec("ALTER TABLE ip_bans ADD COLUMN whitelisted TINYINT(1) NOT NULL DEFAULT 0 AFTER active");
+        }
+
+        // ── Schema self-heal (ban → unban → re-ban → unban) ───────────────
+        // The original schema used UNIQUE KEY uk_cidr_active (cidr, active),
+        // which allowed a SECOND row per subnet after an unban: the old row
+        // holds (cidr, 0), a re-ban inserts a fresh (cidr, 1) row, and the
+        // next unban tries to flip that row to (cidr, 0) — colliding with the
+        // still-present inactive row. MySQL rejects the UPDATE with a
+        // duplicate-key error, so the dashboard showed "Failed to remove IP
+        // ban" forever after the first ban→unban→re-ban cycle.
+        //
+        // Fix: keep ONE row per subnet (UNIQUE KEY uk_cidr) and toggle active.
+        // re-ban re-activates the same row via ON DUPLICATE KEY UPDATE, so
+        // unban never collides. Migrate existing tables idempotently.
+        $dbName = (string)$pdo->query("SELECT DATABASE()")->fetchColumn();
+        $idxStmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'ip_bans' AND INDEX_NAME = 'uk_cidr_active'"
+        );
+        $idxStmt->execute([$dbName]);
+        if ((int)$idxStmt->fetchColumn() > 0) {
+            // Collapse duplicates: prefer the newest ACTIVE ban per subnet,
+            // drop stale inactive rows and older duplicates.
+            $pdo->exec(
+                "DELETE b FROM ip_bans b
+                 INNER JOIN ip_bans k
+                   ON k.cidr = b.cidr
+                  AND (k.active > b.active OR (k.active = b.active AND k.created_at > b.created_at))"
+            );
+            $pdo->exec("ALTER TABLE ip_bans DROP INDEX uk_cidr_active, ADD UNIQUE KEY uk_cidr (cidr)");
+        }
     } catch (Throwable $e) {
         // Never break the request over a missing table — the login flow
         // reports the failure cleanly below.
     }
+}
+
+function isIpWhitelisted(string $ip): bool {
+    global $pdo;
+    if (!$pdo) {
+        return false;
+    }
+    ensureBanTable();
+    $version = ipVersion($ip);
+    try {
+        $stmt = $pdo->prepare(
+            "SELECT * FROM ip_bans
+             WHERE active = 1 AND whitelisted = 1
+             AND ip_version = ?
+             ORDER BY created_at DESC"
+        );
+        $stmt->execute([$version]);
+        while ($ban = $stmt->fetch()) {
+            if (isIpInRange($ip, (string)($ban['ban_start'] ?? ''), (string)($ban['ban_end'] ?? ''))) {
+                return true;
+            }
+        }
+    } catch (Throwable $e) {
+        return false;
+    }
+    return false;
 }
 
 function getBanForIp(string $ip): ?array {
@@ -556,6 +820,7 @@ function getBanForIp(string $ip): ?array {
     $stmt = $pdo->prepare(
         "SELECT * FROM ip_bans
          WHERE active = 1
+         AND whitelisted = 0
          AND ip_version = ?
          ORDER BY created_at DESC"
     );
@@ -571,12 +836,154 @@ function getBanForIp(string $ip): ?array {
 }
 
 function queueMail(string $to, string $subject, string $body): void {
+    queueMailHtml($to, $subject, $body, '');
+}
+
+// ─── Transactional Email Engine (branded HTML templates + queue) ────────────
+// Emails are queued to mail_queue (plain-text body + optional branded HTML),
+// sent by the cron worker (send-mail.php) using the PRIMARY transport with the
+// secondary as automatic fallback. Templates are overridable from the admin
+// dashboard (email_template_<key>_subject / _body settings) and every email is
+// wrapped in a branded, responsive HTML shell (logo header + social footer).
+
+/** Idempotently add the html column to mail_queue (fresh + existing installs). */
+function ensureMailQueueHtmlColumn(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM mail_queue")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('html', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN html MEDIUMTEXT NULL AFTER body");
+        }
+        if (!in_array('from_email', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN from_email VARCHAR(255) DEFAULT NULL AFTER html");
+        }
+        if (!in_array('from_name', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN from_name VARCHAR(120) DEFAULT NULL AFTER from_email");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
+/**
+ * Queue a transactional email — plain-text body plus an optional branded HTML
+ * body. Per-row From identity is supported (used by donation receipts) and
+ * falls back to the global identity when omitted.
+ */
+function queueMailHtml(string $to, string $subject, string $body, string $html = '', ?string $fromName = null, ?string $fromEmail = null): void {
     global $pdo;
     if (!$pdo || empty($to)) {
         return;
     }
-    $stmt = $pdo->prepare("INSERT INTO mail_queue (id, to_email, subject, body, sent) VALUES (?, ?, ?, ?, 0)");
-    $stmt->execute([generateId(), $to, $subject, $body]);
+    ensureMailQueueHtmlColumn();
+    try {
+        $stmt = $pdo->prepare(
+            "INSERT INTO mail_queue (id, to_email, subject, body, html, from_email, from_name, sent) VALUES (?, ?, ?, ?, ?, ?, ?, 0)"
+        );
+        $stmt->execute([generateId(), $to, $subject, $body, $html, $fromEmail, $fromName]);
+    } catch (Throwable $e) {
+        // Never break the caller over a best-effort email queue.
+    }
+}
+
+/** Build an absolute URL from the current request host (emails need absolute links). */
+function siteAbsoluteUrl(string $path = ''): string {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return $scheme . '://' . $host . '/' . ltrim($path, '/');
+}
+
+/** Resolve the site logo URL used in the branded email header (setting overrides packaged logo). */
+function siteLogoUrl(): string {
+    $logo = trim((string)getSetting('site_logo_url', ''));
+    if ($logo !== '') {
+        return str_starts_with($logo, 'http') || str_starts_with($logo, 'data:') ? $logo : siteAbsoluteUrl($logo);
+    }
+    return siteAbsoluteUrl('assets/images/dailyimpact.png');
+}
+
+/** Social profile URLs used in the branded email footer (settings overridable). */
+function emailSocialLinks(): array {
+    return [
+        'facebook'  => (string)getSetting('social_facebook', 'https://facebook.com/andrewosakwe'),
+        'twitter'   => (string)getSetting('social_twitter', 'https://twitter.com/andrewosakwe'),
+        'instagram' => (string)getSetting('social_instagram', 'https://instagram.com/andrewosakwe'),
+        'youtube'   => (string)getSetting('social_youtube', 'https://youtube.com/andrewosakwe'),
+    ];
+}
+
+/**
+ * The From identity ({name} <{email}>). Donation-specific override applies when
+ * $scope === 'donation' and the admin configured one; otherwise the general
+ * identity (resend_from_name / resend_from_email) is used everywhere.
+ */
+function emailFromIdentity(string $scope = 'general'): array {
+    $name  = (string)getSetting('resend_from_name', 'Daily Impact Devotional');
+    $email = (string)getSetting('resend_from_email', '');
+    if ($scope === 'donation') {
+        $dName  = (string)getSetting('donation_from_name', '');
+        $dEmail = (string)getSetting('donation_from_email', '');
+        if ($dEmail !== '') {
+            $name  = $dName !== '' ? $dName : $name;
+            $email = $dEmail;
+        }
+    }
+    return ['name' => $name, 'email' => $email];
+}
+
+/**
+ * Idempotently create the login_logs table if it is missing, and add the
+ * columns the login/audit flow depends on. Older deployments (pre-login-audit
+ * database.sql) have no table at all, which made admin.php's INSERT and
+ * login-log.php's SELECT throw on every request — the Admin Login Audit Log
+ * silently stayed empty. Self-healing here means a stale database starts
+ * recording logins immediately, no re-install.
+ */
+function ensureLoginLogTable(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS login_logs (
+                id VARCHAR(36) PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                location VARCHAR(255),
+                success TINYINT(1) DEFAULT 0,
+                logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_email (email),
+                INDEX idx_logged_at (logged_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        $cols = $pdo->query("SHOW COLUMNS FROM login_logs")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('ip_address', $cols, true)) {
+            $pdo->exec("ALTER TABLE login_logs ADD COLUMN ip_address VARCHAR(45) DEFAULT NULL AFTER email");
+        }
+        if (!in_array('location', $cols, true)) {
+            $pdo->exec("ALTER TABLE login_logs ADD COLUMN location VARCHAR(255) DEFAULT NULL AFTER user_agent");
+        }
+        if (!in_array('logged_at', $cols, true)) {
+            $pdo->exec("ALTER TABLE login_logs ADD COLUMN logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER success");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a brand-new install — install.php creates it.
+    }
 }
 
 function recordIpBan(string $ip, string $reason, string $email = '', int $failedAttempts = 0, string $source = 'admin-login'): ?array {
@@ -584,9 +991,14 @@ function recordIpBan(string $ip, string $reason, string $email = '', int $failed
     if (!$pdo) {
         return null;
     }
+    // Whitelisted IPs are never banned — an admin explicitly allowed them.
+    if (isIpWhitelisted($ip)) {
+        return null;
+    }
     $cidr = normalizeSubnet($ip);
     [$banStart, $banEnd] = ipRangeForSubnet($cidr);
     $version = ipVersion($ip);
+    ensureBanTable();
     $stmt = $pdo->prepare(
         "INSERT INTO ip_bans
             (id, ip_address, ip_version, cidr, ban_start, ban_end, reason, source, email, failed_attempts, active)
@@ -624,10 +1036,16 @@ function unbanIpBan(string $id, ?string $adminEmail = null): bool {
     if (!$pdo) {
         return false;
     }
-    $stmt = $pdo->prepare(
-        "UPDATE ip_bans SET active = 0, unbanned_at = NOW(), unbanned_by = ? WHERE id = ?"
-    );
-    return $stmt->execute([$adminEmail, $id]);
+    try {
+        ensureBanTable();
+        $stmt = $pdo->prepare(
+            "UPDATE ip_bans SET active = 0, unbanned_at = NOW(), unbanned_by = ? WHERE id = ?"
+        );
+        $stmt->execute([$adminEmail, $id]);
+        return true;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 // ─── Real MIME detection ────────────────────────────────────────────────────
@@ -764,6 +1182,15 @@ function secureSession(int $maxIdleSeconds = 3600): bool {
         return false;
     }
 
+    // Absolute lifetime cap: even with constant activity, a session dies after
+    // 24 hours. A stolen session cookie can never stay valid indefinitely.
+    $sessionCreated = (int)($_SESSION['created_at'] ?? 0);
+    if ($sessionCreated > 0 && (time() - $sessionCreated) > 86400) {
+        $_SESSION = [];
+        session_destroy();
+        return false;
+    }
+
     // Validate fingerprint binding
     if (!validateSessionBinding()) {
         // Possible hijack — destroy session
@@ -783,7 +1210,296 @@ function secureSession(int $maxIdleSeconds = 3600): bool {
         return false;
     }
 
+    // Session-version guard: when an admin bumps session_version ("log out all
+    // sessions" from the login-notification email), every pre-existing session
+    // for that user becomes invalid and is destroyed on its next API call.
+    if (!empty($_SESSION['admin_id'])) {
+        try {
+            ensureSessionVersionColumn();
+            $stmt = $pdo->prepare("SELECT session_version FROM admin_users WHERE id = ?");
+            $stmt->execute([$_SESSION['admin_id']]);
+            $current = $stmt->fetchColumn();
+            if ($current !== false && (int)$current !== (int)($_SESSION['admin_session_version'] ?? 0)) {
+                $_SESSION = [];
+                session_destroy();
+                return false;
+            }
+        } catch (Throwable $e) {
+            // Version column may not exist yet on a partially-migrated DB —
+            // never lock admins out over the version check.
+        }
+    }
+
     return true;
+}
+
+// ─── Two-Factor Authentication (2FA) ────────────────────────────────────────
+// Real, server-verified 2FA: TOTP (authenticator app, RFC 6238) and Email OTP.
+// Secrets/backup codes live on the admin_users row; OTPs are verified server-
+// side so a client can never self-activate or bypass verification. Backup codes
+// are stored as SHA-256 hashes and consumed on use.
+
+/**
+ * Idempotently add the 2FA columns to admin_users (fresh + existing installs).
+ */
+function ensureTwoFaColumns(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM admin_users")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('totp_secret', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN totp_secret VARCHAR(255) NOT NULL DEFAULT '' AFTER status");
+        }
+        if (!in_array('totp_enabled', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN totp_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER totp_secret");
+        }
+        if (!in_array('email_otp_enabled', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN email_otp_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER totp_enabled");
+        }
+        if (!in_array('backup_codes', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN backup_codes TEXT NULL AFTER email_otp_enabled");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
+// ── TOTP (RFC 6238) — pure PHP, no extensions beyond hash_hmac ───────────────
+
+function base32Decode(string $b32): string {
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $b32 = strtoupper((string)preg_replace('/[^A-Z2-7]/', '', $b32));
+    if ($b32 === '') {
+        return '';
+    }
+    $buffer = 0;
+    $bitsLeft = 0;
+    $out = '';
+    $len = strlen($b32);
+    for ($i = 0; $i < $len; $i++) {
+        $val = strpos($alphabet, $b32[$i]);
+        if ($val === false) {
+            continue;
+        }
+        $buffer = ($buffer << 5) | $val;
+        $bitsLeft += 5;
+        if ($bitsLeft >= 8) {
+            $out .= chr(($buffer >> ($bitsLeft - 8)) & 0xFF);
+            $bitsLeft -= 8;
+        }
+    }
+    return $out;
+}
+
+/** Generate a 160-bit base32 TOTP secret (32 chars — standard for 2FA apps). */
+function generateTotpSecret(): string {
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $secret = '';
+    $random = random_bytes(20);
+    for ($i = 0; $i < 20; $i++) {
+        $secret .= $alphabet[ord($random[$i]) % 32];
+    }
+    return $secret;
+}
+
+/** RFC 6238 code for a given timestamp (default: 6 digits, 30s period). */
+function totpCode(string $secret, int $timestamp, int $period = 30, int $digits = 6): string {
+    $counter = intdiv($timestamp, $period);
+    // 8-byte big-endian counter (two 32-bit words — fine until year ~2042).
+    $bin = pack('N2', 0, $counter);
+    $key = base32Decode($secret);
+    $hash = hash_hmac('sha1', $bin, $key, true);
+    $offset = ord($hash[strlen($hash) - 1]) & 0x0F;
+    $value = ((ord($hash[$offset]) & 0x7F) << 24)
+           | ((ord($hash[$offset + 1]) & 0xFF) << 16)
+           | ((ord($hash[$offset + 2]) & 0xFF) << 8)
+           | (ord($hash[$offset + 3]) & 0xFF);
+    return str_pad((string)($value % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
+}
+
+/** Verify a TOTP code allowing +/- $window time-steps of clock drift. */
+function verifyTotp(string $secret, string $code, int $window = 1): bool {
+    $code = preg_replace('/\D/', '', (string)$code);
+    if ($secret === '' || strlen($code) !== 6) {
+        return false;
+    }
+    $t = time();
+    for ($w = -$window; $w <= $window; $w++) {
+        if (hash_equals(totpCode($secret, $t + ($w * 30)), $code)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ── Backup / recovery codes ───────────────────────────────────────────────────
+
+/** Generate N one-time recovery codes (8 uppercase hex chars each). */
+function generateBackupCodes(int $count = 5): array {
+    $codes = [];
+    for ($i = 0; $i < $count; $i++) {
+        $codes[] = strtoupper(bin2hex(random_bytes(4)));
+    }
+    return $codes;
+}
+
+function hashBackupCode(string $code): string {
+    return hash('sha256', strtoupper(trim($code)));
+}
+
+/**
+ * Consume a recovery code for the given admin row. Returns the number of codes
+ * REMAINING after consumption, or null when the code is invalid/absent.
+ * Persists the updated list to the DB.
+ */
+function consumeBackupCode(array $admin, string $code): ?int {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return null;
+    }
+    $hashes = json_decode((string)($admin['backup_codes'] ?? '[]'), true);
+    if (!is_array($hashes) || count($hashes) === 0) {
+        return null;
+    }
+    $target = hashBackupCode($code);
+    $idx = null;
+    foreach ($hashes as $i => $h) {
+        if (is_string($h) && hash_equals($h, $target)) {
+            $idx = $i;
+            break;
+        }
+    }
+    if ($idx === null) {
+        return null;
+    }
+    array_splice($hashes, $idx, 1);
+    try {
+        $stmt = $pdo->prepare("UPDATE admin_users SET backup_codes = ? WHERE id = ?");
+        $stmt->execute([json_encode(array_values($hashes)), (int)$admin['id']]);
+    } catch (Throwable $e) {
+        return null;
+    }
+    return count($hashes);
+}
+
+/**
+ * Shared alert throttle: returns TRUE when an alert may be sent now (not
+ * throttled) and records the send. The map lives in one settings key and is
+ * pruned to 7 days so the settings table never grows unbounded. Used by the
+ * failed-login email alerts (admin.php + login-log.php) to stop an attacker
+ * flooding admin inboxes.
+ */
+function alertNotThrottled(string $mapKey, string $subjectHash, int $windowSec = 1800): bool
+{
+    try {
+        $saved = getSetting($mapKey, '{}');
+        $map = json_decode((string)$saved, true);
+        if (!is_array($map)) {
+            $map = [];
+        }
+        $now = time();
+        foreach ($map as $k => $ts) {
+            if ($now - (int)$ts > 604800) unset($map[$k]);
+        }
+        if (isset($map[$subjectHash]) && ($now - (int)$map[$subjectHash]) < $windowSec) {
+            return false;
+        }
+        $map[$subjectHash] = $now;
+        setSetting($mapKey, json_encode($map));
+        return true;
+    } catch (Throwable $e) {
+        return true; // never block an alert because of storage problems
+    }
+}
+
+/**
+ * Idempotently add the session_version column to admin_users.
+ *
+ * session_version powers "log out all sessions": bumping it invalidates every
+ * existing PHP session for that user, because secureSession() compares the
+ * version stored in the session against the user's row and destroys the
+ * session on mismatch. Sessions themselves are file-based on cPanel, so they
+ * can't be enumerated — the version stamp is the reliable way to revoke them.
+ */
+function ensureSessionVersionColumn(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM admin_users")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('session_version', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN session_version INT NOT NULL DEFAULT 0 AFTER backup_codes");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
+/** Current 2FA status for an admin_users row. */
+function twofaStatusForUser(array $admin): array {
+    $methods = [];
+    if ((int)($admin['totp_enabled'] ?? 0) === 1) {
+        $methods[] = 'app';
+    }
+    if ((int)($admin['email_otp_enabled'] ?? 0) === 1) {
+        $methods[] = 'email';
+    }
+    $codes = json_decode((string)($admin['backup_codes'] ?? '[]'), true);
+    $remaining = is_array($codes) ? count($codes) : 0;
+    return [
+        'enabled'         => count($methods) > 0,
+        'methods'         => $methods,
+        'backupRemaining' => $remaining,
+    ];
+}
+
+/**
+ * Complete an admin login: regenerate the session id, bind the fingerprint,
+ * populate session vars and clear any pending-2FA / lockout state. Shared by
+ * the plain login path and the post-2FA-verification path so both behave
+ * identically.
+ */
+function establishAdminSession(array $admin): void {
+    regenerateSession();
+    $fingerprint = sessionFingerprint();
+    $_SESSION['admin_id']            = $admin['id'];
+    $_SESSION['admin_email']         = $admin['email'];
+    $_SESSION['admin_name']          = $admin['name'];
+    $_SESSION['admin_bio']           = (string)($admin['bio'] ?? '');
+    $_SESSION['admin_role']          = $admin['role'];
+    $_SESSION['session_fingerprint'] = $fingerprint;
+    $_SESSION['last_activity']       = time();
+    $_SESSION['created_at']          = time();
+    $_SESSION['admin_session_version'] = (int)($admin['session_version'] ?? 0);
+    unset(
+        $_SESSION['pending_2fa'],
+        $_SESSION['2fa_attempts'],
+        $_SESSION['2fa_email_code_hash'],
+        $_SESSION['2fa_email_expires'],
+        $_SESSION['2fa_email_attempts']
+    );
+
+    // Clear any lockout for this IP (mirrors the old inline login code).
+    $ip = getClientIp();
+    $lockKey = 'login_lock_' . preg_replace('/[^a-f0-9]/', '', hash('sha256', $ip));
+    try {
+        setSetting($lockKey, '0');
+    } catch (Throwable $e) {
+        // best-effort
+    }
 }
 
 // ─── Donation columns (idempotent migration) ─────────────────────────────────
@@ -921,3 +1637,9 @@ function parseDateParts(string $dateStr): array {
     
     return ['month' => 'January', 'day' => 1];
 }
+
+// ─── Email Template Engine (branded HTML emails + CSV export helper) ────────
+// All functions are defined in this include so db.php stays small and the
+// large HTML templates live in one place. It only defines functions — nothing
+// executes — so including it here is safe for every consumer of db.php.
+require_once __DIR__ . '/email-templates.php';

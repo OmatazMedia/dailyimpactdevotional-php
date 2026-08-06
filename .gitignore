@@ -11,7 +11,9 @@ coverage/
 !.env.example
 
 # ─── Runtime-created folders (uploads + PHP sessions) ─────────────────────
-upload/
+upload/*
+# ...except the hardening file that must ship with every deploy.
+!upload/.htaccess
 tmp/
 
 # ─── Deployment artifacts (regenerable via npm run build + zip-deploy) ────

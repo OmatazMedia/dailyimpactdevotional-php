@@ -37,7 +37,7 @@ switch ($method) {
         break;
 
     case 'POST':
-        requireAdmin();
+        requireSection('foreword');
         // POST /api/foreword - Create new post
         $input = jsonInput();
         $postId = generateId();
@@ -66,7 +66,7 @@ switch ($method) {
         break;
 
     case 'PUT':
-        requireAdmin();
+        requireSection('foreword');
         if ($id) {
             // PUT /api/foreword?id=X - Update specific post
             $input = jsonInput();
@@ -125,7 +125,7 @@ switch ($method) {
         break;
 
     case 'DELETE':
-        requireAdmin();
+        requireSection('foreword');
         // DELETE /api/foreword?id=X
         if (!$id) jsonError('Missing foreword id', 400);
 

@@ -98,7 +98,7 @@ switch ($method) {
         break;
 
     case 'POST':
-        requireAdmin();
+        requireAnySection(['add-devotional', 'manage-devotionals', 'import-devotional']);
         if ($isBulk) {
             // POST /api/devotionals/bulk - Bulk import
             $input = jsonInput();
@@ -227,7 +227,7 @@ switch ($method) {
         break;
 
     case 'PUT':
-        requireAdmin();
+        requireAnySection(['add-devotional', 'manage-devotionals', 'import-devotional']);
         // PUT /api/devotionals?id=X
         if (!$id) jsonError('Missing devotional id', 400);
 
@@ -265,7 +265,7 @@ switch ($method) {
         break;
 
     case 'DELETE':
-        requireAdmin();
+        requireAnySection(['add-devotional', 'manage-devotionals', 'import-devotional']);
         // DELETE /api/devotionals?id=X
         if (!$id) jsonError('Missing devotional id', 400);
 

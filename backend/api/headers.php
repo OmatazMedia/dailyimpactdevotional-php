@@ -85,7 +85,7 @@ switch ($method) {
         break;
 
     case 'POST':
-        requireAdmin();
+        requireSection('header-images');
         // POST /api/headers - Save/update header mapping
         $input = jsonInput();
         $inputDateKey = $input['dateKey'] ?? '';
@@ -213,7 +213,7 @@ switch ($method) {
         break;
 
     case 'DELETE':
-        requireAdmin();
+        requireSection('header-images');
         // DELETE /api/headers?dateKey=X
         if (!$dateKey) jsonError('Missing dateKey parameter', 400);
 
