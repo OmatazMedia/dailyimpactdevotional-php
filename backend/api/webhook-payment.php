@@ -156,20 +156,27 @@ $upd = $pdo->prepare(
 );
 $upd->execute([$status, $amount, $currency, $email, $email, $name, $name, $provider, $existing['id']]);
 
-// Send notification if configured
+// Send notification if configured (donation event toggle + dedicated list)
 if ($status === 'success') {
-    $notifyEmail = (string)getSetting('notify_email', '');
-    if ($notifyEmail !== '') {
-        $subject = "💰 New Donation Received — {$currency} " . number_format($amount, 2);
-        $body = "A donation was received:\n\n"
-              . "Amount: {$currency} " . number_format($amount, 2) . "\n"
-              . "From: " . ($name ?: $email) . "\n"
-              . "Provider: " . ucfirst($provider) . "\n"
-              . "Reference: {$reference}\n"
-              . "Date: " . date('Y-m-d H:i:s') . "\n";
-        try {
-            queueMail($notifyEmail, $subject, $body);
-        } catch (Throwable $e) { /* non-fatal */ }
+    if (notifyEventEnabled('donation')) {
+        // Dedicated donation list first, then the security list, then legacy
+        // notify_email as a last resort for older installs.
+        $notifyEmails = notifyRecipients('donation_notify_emails', 'security_notify_emails');
+        if (!$notifyEmails) $notifyEmails = notifyRecipients('notify_email');
+        if ($notifyEmails) {
+            $subject = "💰 New Donation Received — {$currency} " . number_format($amount, 2);
+            $body = "A donation was received:\n\n"
+                  . "Amount: {$currency} " . number_format($amount, 2) . "\n"
+                  . "From: " . ($name ?: $email) . "\n"
+                  . "Provider: " . ucfirst($provider) . "\n"
+                  . "Reference: {$reference}\n"
+                  . "Date: " . date('Y-m-d H:i:s') . "\n";
+            try {
+                foreach ($notifyEmails as $notifyEmail) {
+                    queueMail($notifyEmail, $subject, $body);
+                }
+            } catch (Throwable $e) { /* non-fatal */ }
+        }
     }
 }
 

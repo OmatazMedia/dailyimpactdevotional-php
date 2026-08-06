@@ -163,12 +163,7 @@ const activityDotColor = (action: string): string => {
 };
 
 // "15 minutes ago" style timestamps from the server's "YYYY-MM-DD HH:MM:SS".
-const formatRelativeTime = (sql: string): string => {
-  if (!sql) return "";
-  const m = sql.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
-  if (!m) return sql;
-  const then = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
-  if (Number.isNaN(then)) return sql;
+const relativeFrom = (then: number): string => {
   const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
   if (diffSec < 60) return "just now";
   const min = Math.floor(diffSec / 60);
@@ -177,7 +172,28 @@ const formatRelativeTime = (sql: string): string => {
   if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
   const day = Math.floor(hr / 24);
   if (day < 30) return `${day} day${day === 1 ? "" : "s"} ago`;
-  return sql.slice(0, 10);
+  return ""; // caller falls back to the raw date
+};
+
+const formatRelativeTime = (sql: string): string => {
+  if (!sql) return "";
+  // ISO-8601 WITH an explicit offset (e.g. 2026-08-06T08:10:00+01:00 or …Z):
+  // parse the real instant so "6 hours ago" never appears for fresh activity.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/i.test(sql)) {
+    const t = new Date(sql).getTime();
+    if (!Number.isNaN(t)) {
+      // Offset-bearing strings NEVER fall through to the legacy local-time
+      // parser — old entries just show the date instead.
+      return relativeFrom(t) || sql.slice(0, 10);
+    }
+  }
+  // Legacy timezone-less "YYYY-MM-DD HH:MM:SS": best-effort as browser-local.
+  const m = sql.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return sql;
+  const then = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+  if (Number.isNaN(then)) return sql;
+  const rel = relativeFrom(then);
+  return rel || sql.slice(0, 10);
 };
 
 export default function Dashboard({ 
@@ -876,7 +892,18 @@ export default function Dashboard({
         const res = await fetch(`${API_BASE}/email-config.php`);
         if (res.ok) {
           const data = await res.json();
-          setEmailConfig(data);
+          // Merge so the new notification-toggle fields default correctly even
+          // if an older server response omits them.
+          setEmailConfig((prev) => ({
+            ...prev,
+            ...data,
+            resend: { ...prev.resend, ...(data?.resend || {}) },
+            smtp: { ...prev.smtp, ...(data?.smtp || {}) },
+            donation: { ...prev.donation, ...(data?.donation || {}) },
+            notifyEvents: { ...prev.notifyEvents, ...(data?.notifyEvents || {}) },
+            donationNotifyEmails: data?.donationNotifyEmails ?? prev.donationNotifyEmails,
+            notifyEmails: data?.notifyEmails ?? prev.notifyEmails,
+          }));
         }
       } catch (error) {
         console.error("Failed to load email config:", error);
@@ -1530,7 +1557,7 @@ export default function Dashboard({
   
   // Admin Timezone State
   const [adminTimezone, setAdminTimezone] = useState<string>("Africa/Lagos");
-  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "payments" | "roles">("profile");
+  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles">("profile");
   
   // Email Configuration State
   const [emailConfig, setEmailConfig] = useState({
@@ -1554,7 +1581,14 @@ export default function Dashboard({
       fromName: '',
       fromEmail: ''
     },
-    notifyEmails: ''
+    notifyEmails: '',
+    donationNotifyEmails: '',
+    notifyEvents: {
+      login: true,
+      failedLogin: true,
+      ipBan: true,
+      donation: true
+    }
   });
   const [tgRescheduleId, setTgRescheduleId] = useState<string | null>(null);
   const [tgRescheduleTime, setTgRescheduleTime] = useState("06:00");
@@ -3780,6 +3814,19 @@ export default function Dashboard({
 
                     <button
                       type="button"
+                      onClick={() => setSettingsSubTab("templates")}
+                      className={`pb-2.5 px-1 border-b-2 transition-all flex items-center gap-2 ${
+                        settingsSubTab === "templates"
+                          ? "border-teal-brand text-teal-brand font-black"
+                          : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                      }`}
+                    >
+                      <FileText className="w-4 h-4" />
+                      Email Templates
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setSettingsSubTab("payments")}
                       className={`pb-2.5 px-1 border-b-2 transition-all flex items-center gap-2 ${
                         settingsSubTab === "payments"
@@ -4772,7 +4819,9 @@ export default function Dashboard({
 
                           <div className="space-y-4">
                             <p className="text-[11px] leading-relaxed text-slate-500">
-                              Configure email delivery methods. Resend is recommended as primary, SMTP as backup.
+                              Delivery sequence: the <strong>Primary</strong> method is tried first; if it fails
+                              (or isn't enabled) the system automatically retries with the <strong>Secondary</strong>.
+                              Both are configured below — the badges show which role each one plays.
                             </p>
 
                             {/* Mail Method Selection */}
@@ -4804,10 +4853,30 @@ export default function Dashboard({
                               </div>
                             </div>
 
-                            {/* Resend Configuration */}
-                            {emailConfig.mailMethod === 'resend' && (
-                              <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
-                                <div className="space-y-1">
+                            {/* Resend Configuration — always visible; PRIMARY or SECONDARY badge */}
+                            <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <label className="text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300">Resend API</label>
+                                  <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                    emailConfig.mailMethod === 'resend'
+                                      ? 'bg-teal-brand/15 text-teal-brand'
+                                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                  }`}>
+                                    {emailConfig.mailMethod === 'resend' ? 'Primary — tried first' : 'Secondary — fallback'}
+                                  </span>
+                                </div>
+                                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={emailConfig.resend.enabled}
+                                    onChange={(e) => setEmailConfig({ ...emailConfig, resend: { ...emailConfig.resend, enabled: e.target.checked } })}
+                                    className="w-3.5 h-3.5 accent-teal-brand"
+                                  />
+                                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">Enabled</span>
+                                </label>
+                              </div>
+                              <div className="space-y-1">
                                   <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Resend API Key</label>
                                   <input
                                     type="password"
@@ -4856,11 +4925,30 @@ export default function Dashboard({
                                   />
                                 </div>
                               </div>
-                            )}
 
-                            {/* SMTP Configuration */}
-                            {emailConfig.mailMethod === 'smtp' && (
-                              <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                            {/* SMTP Configuration — always visible; PRIMARY or SECONDARY badge */}
+                            <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <label className="text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300">SMTP</label>
+                                  <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                    emailConfig.mailMethod === 'smtp'
+                                      ? 'bg-teal-brand/15 text-teal-brand'
+                                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                  }`}>
+                                    {emailConfig.mailMethod === 'smtp' ? 'Primary — tried first' : 'Secondary — fallback'}
+                                  </span>
+                                </div>
+                                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={emailConfig.smtp.enabled}
+                                    onChange={(e) => setEmailConfig({ ...emailConfig, smtp: { ...emailConfig.smtp, enabled: e.target.checked } })}
+                                    className="w-3.5 h-3.5 accent-teal-brand"
+                                  />
+                                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">Enabled</span>
+                                </label>
+                              </div>
                                 <div className="space-y-1">
                                   <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">SMTP Host</label>
                                   <input
@@ -4926,10 +5014,46 @@ export default function Dashboard({
                                   </div>
                                 </div>
                               </div>
-                            )}
+
+                            {/* Notification Events — choose which emails the system sends */}
+                            <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                              <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Notification Events</label>
+                              <div className="grid grid-cols-2 gap-2">
+                                {[
+                                  { key: 'login', label: 'Admin Login' },
+                                  { key: 'failedLogin', label: 'Failed Login' },
+                                  { key: 'ipBan', label: 'IP Banned / Unbanned' },
+                                  { key: 'donation', label: 'Donation Received' },
+                                ].map((ev) => {
+                                  const on = !!emailConfig.notifyEvents?.[ev.key as keyof typeof emailConfig.notifyEvents];
+                                  return (
+                                    <label
+                                      key={ev.key}
+                                      className={`flex items-center gap-2 px-3 py-2 rounded-xl border cursor-pointer select-none transition-all ${
+                                        on
+                                          ? 'border-teal-brand/40 bg-teal-brand/10'
+                                          : isDarkMode ? 'border-slate-800 bg-slate-950/40 opacity-60' : 'border-slate-200 bg-slate-50 opacity-60'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={on}
+                                        onChange={(e) => setEmailConfig({
+                                          ...emailConfig,
+                                          notifyEvents: { ...emailConfig.notifyEvents, [ev.key]: e.target.checked },
+                                        })}
+                                        className="w-3.5 h-3.5 accent-teal-brand"
+                                      />
+                                      <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">{ev.label}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[9px] text-slate-400">Turn off any event you don't want emailed. Security alerts go to the security list; donations go to the donation list below.</p>
+                            </div>
 
                             {/* Security Notification Emails */}
-                            <div className="space-y-1 pt-3 border-t border-slate-100 dark:border-slate-800">
+                            <div className="space-y-1">
                               <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Security Notification Emails</label>
                               <input
                                 type="text"
@@ -4940,7 +5064,22 @@ export default function Dashboard({
                                   isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
                                 }`}
                               />
-                              <p className="text-[9px] text-slate-400">Comma-separated list of admin emails to receive security alerts</p>
+                              <p className="text-[9px] text-slate-400">Comma-separated list of admin emails that receive login, failed-login and IP-ban alerts</p>
+                            </div>
+
+                            {/* Donation Notification Emails */}
+                            <div className="space-y-1">
+                              <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Donation Notification Emails</label>
+                              <input
+                                type="text"
+                                placeholder="finance@example.com, admin@example.com"
+                                value={emailConfig.donationNotifyEmails}
+                                onChange={(e) => setEmailConfig({ ...emailConfig, donationNotifyEmails: e.target.value })}
+                                className={`w-full py-2 pl-3 pr-10 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
+                                  isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                                }`}
+                              />
+                              <p className="text-[9px] text-slate-400">Comma-separated list of emails that receive new-donation alerts (falls back to the security list if empty)</p>
                             </div>
 
                             {/* Donation emails From identity */}
@@ -5023,10 +5162,12 @@ export default function Dashboard({
                           {/* Login Audit Panel */}
                           <EmailAuditPanel isDarkMode={isDarkMode} showToast={showToast} />
                         </div>
-
-                        {/* Email Templates & Branding — fully customisable + responsive */}
-                        <EmailTemplatesPanel isDarkMode={isDarkMode} showToast={showToast} />
                       </div>
+                    )}
+
+                    {/* Tab 4b: Email Templates & Branding — drag-and-drop builder */}
+                    {settingsSubTab === "templates" && (
+                      <EmailTemplatesPanel isDarkMode={isDarkMode} showToast={showToast} />
                     )}
 
                     {/* Tab 5: Payments & Donations Settings */}

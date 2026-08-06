@@ -1364,11 +1364,13 @@ const EMAIL_TEMPLATE_KEYS = ["login_notification", "failed_login_alert", "donor_
 
 app.get("/api/email-config", (req: Request, res: Response) => {
   if (req.query.action === "templates") {
+    const sTpl = readJson<Record<string, string>>(SETTINGS_FILE, {});
     res.json({
       templates: EMAIL_TEMPLATE_KEYS.map(key => ({
         key,
-        subject: `[${key}] subject`,
-        body: `<p>Edit the <b>${key}</b> template body here. Tokens like {{donor_name}} are replaced when the email is sent.</p>`,
+        subject: sTpl[`email_template_${key}_subject`] ?? `[${key}] subject`,
+        body: sTpl[`email_template_${key}_body`] ?? `<p>Edit the <b>${key}</b> template body here. Tokens like {{donor_name}} are replaced when the email is sent.</p>`,
+        blocks: sTpl[`email_template_${key}_blocks`] ?? "",
       })),
       branding: { siteName: "Daily Impact Devotional", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" },
     });
@@ -1381,6 +1383,13 @@ app.get("/api/email-config", (req: Request, res: Response) => {
     smtp: { host: s.smtp_host ?? "", user: s.smtp_user ?? "", pass: s.smtp_pass ? "********" : "", port: s.smtp_port ?? "587", secure: s.smtp_secure ?? "tls", enabled: (s.smtp_enabled ?? "false") === "true" },
     donation: { fromName: s.donation_from_name ?? "", fromEmail: s.donation_from_email ?? "" },
     notifyEmails: s.security_notify_emails ?? "",
+    donationNotifyEmails: s.donation_notify_emails ?? "",
+    notifyEvents: {
+      login: (s.notify_event_login ?? "true") !== "false",
+      failedLogin: (s.notify_event_failed_login ?? "true") !== "false",
+      ipBan: (s.notify_event_ip_ban ?? "true") !== "false",
+      donation: (s.notify_event_donation ?? "true") !== "false",
+    },
   });
 });
 
@@ -1389,10 +1398,11 @@ app.put("/api/email-config", (req: Request, res: Response) => {
   const s = readJson<Record<string, string>>(SETTINGS_FILE, {});
   if (req.query.action === "templates") {
     // Templates are stored under email_template_<key>_subject/_body.
-    const templates = (body.templates as { key: string; subject?: string; body?: string }[]) ?? [];
+    const templates = (body.templates as { key: string; subject?: string; body?: string; blocks?: string }[]) ?? [];
     for (const t of templates) {
       if (t.subject) s[`email_template_${t.key}_subject`] = t.subject;
       if (t.body) s[`email_template_${t.key}_body`] = t.body;
+      if (typeof t.blocks === "string") s[`email_template_${t.key}_blocks`] = t.blocks;
     }
     const b = (body.branding as Record<string, string>) ?? {};
     if (b.siteName) s.site_name = b.siteName;
@@ -1429,6 +1439,13 @@ app.put("/api/email-config", (req: Request, res: Response) => {
     if (donation.fromEmail) s.donation_from_email = String(donation.fromEmail);
   }
   if (body.notifyEmails) s.security_notify_emails = String(body.notifyEmails);
+  if (body.donationNotifyEmails) s.donation_notify_emails = String(body.donationNotifyEmails);
+  const notifyEvents = body.notifyEvents as Record<string, unknown> | undefined;
+  if (notifyEvents) {
+    for (const [k, v] of Object.entries({ login: "notify_event_login", failedLogin: "notify_event_failed_login", ipBan: "notify_event_ip_ban", donation: "notify_event_donation" })) {
+      if (notifyEvents[k] !== undefined) s[v] = notifyEvents[k] ? "true" : "false";
+    }
+  }
   writeJson(SETTINGS_FILE, s);
   res.json({ success: true });
 });

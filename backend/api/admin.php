@@ -101,8 +101,9 @@ function adminTimezoneNow(): string
 /** Branded "new admin login" notification with the log-out-all + reset buttons. */
 function notifyAdminLogin(string $email, string $ip, string $ua): void
 {
-    $notifyEmails = getSetting('security_notify_emails', '');
-    if ($notifyEmails === '') return;
+    if (!notifyEventEnabled('login')) return;
+    $notifyEmails = notifyRecipients('security_notify_emails');
+    if (!$notifyEmails) return;
 
     $ctx = adminLoginContext($ip, $ua);
     $secureToken = bin2hex(random_bytes(24));
@@ -120,18 +121,17 @@ function notifyAdminLogin(string $email, string $ip, string $ua): void
         'reset_url'      => $origin . 'admin/login',
     ]);
 
-    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
-        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
-            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
-        }
+    foreach ($notifyEmails as $notifyEmail) {
+        queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
     }
 }
 
 /** Branded failed-login alert, throttled to one per email+IP per 30 minutes. */
 function notifyFailedLoginAttempt(string $email, string $ip, int $attemptsRemaining): void
 {
-    $notifyEmails = getSetting('security_notify_emails', '');
-    if ($notifyEmails === '') return;
+    if (!notifyEventEnabled('failed_login')) return;
+    $notifyEmails = notifyRecipients('security_notify_emails');
+    if (!$notifyEmails) return;
 
     // Shared throttle: one alert per email+IP per 30 minutes.
     $h = substr(hash('sha256', strtolower($email) . '|' . $ip), 0, 24);
@@ -149,27 +149,24 @@ function notifyFailedLoginAttempt(string $email, string $ip, int $attemptsRemain
         'attempts_remaining' => (string)max(0, $attemptsRemaining),
     ]);
 
-    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
-        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
-            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
-        }
+    foreach ($notifyEmails as $notifyEmail) {
+        queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
     }
 }
 
 /** Branded "new IP ban" notification (template new_ip_ban). */
 function notifyIpBan(string $ip, string $cidr, string $reason): void
 {
-    $notifyEmails = getSetting('security_notify_emails', '');
-    if ($notifyEmails === '') return;
+    if (!notifyEventEnabled('ip_ban')) return;
+    $notifyEmails = notifyRecipients('security_notify_emails');
+    if (!$notifyEmails) return;
     $rendered = renderEmailTemplate('new_ip_ban', [
         'ban_ip'     => $ip,
         'ban_cidr'   => $cidr,
         'ban_reason' => $reason,
     ]);
-    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
-        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
-            queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
-        }
+    foreach ($notifyEmails as $notifyEmail) {
+        queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
     }
 }
 

@@ -148,8 +148,11 @@ switch ($method) {
 
         // Branded security notifications (throttled on failures) — the primary
         // senders are the admin.php login flow; this covers external callers.
-        $notifyEmails = getSetting('security_notify_emails', '');
-        if ($notifyEmails !== '') {
+        // Gated by the per-event toggles set in Settings → Email.
+        $notifyEmails = notifyEventEnabled($success ? 'login' : 'failed_login')
+            ? notifyRecipients('security_notify_emails')
+            : [];
+        if ($notifyEmails) {
             try {
                 if ($success) {
                     $secureToken = bin2hex(random_bytes(24));
@@ -191,10 +194,8 @@ switch ($method) {
                         'attempts_remaining' => '—',
                     ]);
                 }
-                foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
-                    if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
-                        queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
-                    }
+                foreach ($notifyEmails as $notifyEmail) {
+                    queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
                 }
             } catch (Throwable $e) {
                 // Non-fatal

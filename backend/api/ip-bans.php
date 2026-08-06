@@ -229,20 +229,21 @@ switch ($method) {
         $adminEmail = $_SESSION['admin_email'] ?? 'unknown';
 
         if (unbanIpBan($id, $adminEmail)) {
-            // Notify admins about unban (branded template)
-            $notifyEmails = getSetting('security_notify_emails', '');
-            if ($notifyEmails) {
-                try {
-                    $rendered = renderEmailTemplate('ip_unbanned', [
-                        'ban_ip'   => $id,
-                        'unban_by' => $adminEmail,
-                    ]);
-                    foreach (array_map('trim', explode(',', $notifyEmails)) as $notifyEmail) {
-                        if (filter_var($notifyEmail, FILTER_VALIDATE_EMAIL)) {
+            // Notify admins about unban (branded template) — gated by the
+            // "IP Banned / Unbanned" notification toggle.
+            if (notifyEventEnabled('ip_ban')) {
+                $notifyEmails = notifyRecipients('security_notify_emails');
+                if ($notifyEmails) {
+                    try {
+                        $rendered = renderEmailTemplate('ip_unbanned', [
+                            'ban_ip'   => $id,
+                            'unban_by' => $adminEmail,
+                        ]);
+                        foreach ($notifyEmails as $notifyEmail) {
                             queueMailHtml($notifyEmail, $rendered['subject'], $rendered['text'], $rendered['html']);
                         }
-                    }
-                } catch (Throwable $e) { /* non-fatal */ }
+                    } catch (Throwable $e) { /* non-fatal */ }
+                }
             }
             jsonResponse(['success' => true]);
         } else {

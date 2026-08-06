@@ -404,6 +404,38 @@ function mailTransportSend(array $row): array
     return ['success' => false, 'method' => $method, 'error' => 'Both transports failed. Primary (' . $method . '): ' . ($order[0] === 'smtp' ? mailSendViaSmtp($row)['error'] : mailSendViaResend($row)['error'])];
 }
 
+/**
+ * Whether a notification event should send email.
+ * Events: login, failed_login, ip_ban, donation. Each is toggled from
+ * Settings → Email (stored as notify_event_<event>). Default: on.
+ */
+function notifyEventEnabled(string $event): bool
+{
+    $key = 'notify_event_' . preg_replace('/[^a-z0-9_]/i', '', $event);
+    return (string)getSetting($key, 'true') !== 'false';
+}
+
+/**
+ * Validated recipient list for a notification event. Reads the event's primary
+ * setting (comma-separated emails) and falls back to a legacy key when empty.
+ */
+function notifyRecipients(string $settingKey, string $fallbackKey = ''): array
+{
+    $list = trim((string)getSetting($settingKey, ''));
+    $out = [];
+    if ($list !== '') {
+        foreach (explode(',', $list) as $email) {
+            $email = trim($email);
+            if (filter_var($email, FILTER_VALIDATE_EMAIL)) $out[] = $email;
+        }
+    }
+    // Fall back when the primary list is empty OR contains no valid addresses.
+    if ($out === [] && $fallbackKey !== '') {
+        return notifyRecipients($fallbackKey);
+    }
+    return $out;
+}
+
 /** Stream a CSV download (used by login audit + IP ban exports). */
 function sendCsv(array $headers, array $rows, string $filename): void
 {

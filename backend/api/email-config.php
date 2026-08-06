@@ -26,6 +26,11 @@ switch ($method) {
                 $out[] = [
                     'key'     => $key,
                     'subject' => $tpl['subject'],
+                    // Optional drag-and-drop builder blocks (JSON). Absent on
+                    // fresh installs until the admin first saves via the
+                    // visual builder; the frontend then falls back to parsing
+                    // the HTML body into blocks.
+                    'blocks'  => (string)getSetting('email_template_' . $key . '_blocks', ''),
                     'body'    => $tpl['body'],
                 ];
             }
@@ -64,7 +69,14 @@ switch ($method) {
                 'fromName'  => getSetting('donation_from_name', ''),
                 'fromEmail' => getSetting('donation_from_email', ''),
             ],
-            'notifyEmails' => getSetting('security_notify_emails', '')
+            'notifyEmails' => getSetting('security_notify_emails', ''),
+            'donationNotifyEmails' => getSetting('donation_notify_emails', ''),
+            'notifyEvents' => [
+                'login'       => notifyEventEnabled('login'),
+                'failedLogin' => notifyEventEnabled('failed_login'),
+                'ipBan'       => notifyEventEnabled('ip_ban'),
+                'donation'    => notifyEventEnabled('donation'),
+            ],
         ];
 
         // Mask sensitive data
@@ -94,6 +106,9 @@ switch ($method) {
                     }
                     if (isset($tpl['body'])) {
                         setSetting('email_template_' . $key . '_body', (string)$tpl['body']);
+                    }
+                    if (isset($tpl['blocks'])) {
+                        setSetting('email_template_' . $key . '_blocks', mb_substr((string)$tpl['blocks'], 0, 50000));
                     }
                 }
             }
@@ -174,6 +189,26 @@ switch ($method) {
         // Update security notification emails
         if (isset($input['notifyEmails'])) {
             setSetting('security_notify_emails', mb_substr((string)$input['notifyEmails'], 0, 1000));
+        }
+
+        // Update donation notification recipients (separate, dedicated list)
+        if (isset($input['donationNotifyEmails'])) {
+            setSetting('donation_notify_emails', mb_substr((string)$input['donationNotifyEmails'], 0, 1000));
+        }
+
+        // Per-event notification toggles (login / failed login / IP ban / donation)
+        if (isset($input['notifyEvents']) && is_array($input['notifyEvents'])) {
+            $map = [
+                'login'       => 'login',
+                'failedLogin' => 'failed_login',
+                'ipBan'       => 'ip_ban',
+                'donation'    => 'donation',
+            ];
+            foreach ($map as $field => $event) {
+                if (isset($input['notifyEvents'][$field])) {
+                    setSetting('notify_event_' . $event, !empty($input['notifyEvents'][$field]) ? 'true' : 'false');
+                }
+            }
         }
 
         jsonResponse(['success' => true]);

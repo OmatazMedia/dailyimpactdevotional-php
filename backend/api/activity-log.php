@@ -28,8 +28,34 @@ try {
     $rows = [];
 }
 
+// created_at is a TIMESTAMP column: MySQL returns it in the SESSION timezone
+// (often UTC on cPanel), which the browser cannot interpret on its own. Convert
+// each row to an ISO-8601 string in the admin timezone so the dashboard's
+// "X minutes ago" feed always reflects the real instant, regardless of where
+// the MySQL server / visitor browser clock is set.
+$adminTz = (string)getSetting('admin_timezone', 'Africa/Lagos');
+try {
+    // Seconds from the session's "now" back to UTC (UTC - NOW). A session
+    // running 5h behind UTC yields +18000, meaning the raw string is 5h
+    // behind UTC and must be shifted FORWARD by that many seconds.
+    $sessOffsetSec = (int)$pdo->query("SELECT TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP())")->fetchColumn();
+} catch (Throwable $e) {
+    $sessOffsetSec = 0;
+}
+
 $out = [];
 foreach ($rows as $r) {
+    $createdAt = (string)$r['created_at'];
+    try {
+        $dt = new DateTime($createdAt, new DateTimeZone('UTC'));
+        if ($sessOffsetSec !== 0) {
+            $dt->modify(($sessOffsetSec >= 0 ? '+' : '') . $sessOffsetSec . ' seconds');
+        }
+        $dt->setTimezone(new DateTimeZone($adminTz));
+        $createdAt = $dt->format('c'); // e.g. 2026-08-06T08:10:00+01:00
+    } catch (Throwable $e) {
+        // Leave the raw value; the frontend falls back to best-effort parsing.
+    }
     $out[] = [
         'id'         => (string)$r['id'],
         'action'     => (string)$r['action'],
@@ -38,7 +64,7 @@ foreach ($rows as $r) {
         'entityId'   => (string)$r['entity_id'],
         'actor'      => (string)$r['actor'],
         'ipAddress'  => (string)$r['ip_address'],
-        'createdAt'  => (string)$r['created_at'],
+        'createdAt'  => $createdAt,
     ];
 }
 

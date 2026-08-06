@@ -251,8 +251,16 @@ switch ($method) {
                 try {
                     logActivity('donation', "Donation received: {$row['currency']} " . number_format((float)$row['amount'], 2) . " ({$provider}).", 'donation', $row['id']);
                 } catch (Throwable $e) { /* non-fatal */ }
-                $notifyEmail = getSetting('notify_email', '');
-                if ($notifyEmail !== '') {
+                // Admin new-donation alert — gated by the "Donation Received"
+                // toggle; sent to the dedicated donation list, then the security
+                // list, then legacy notify_email for older installs.
+                if (notifyEventEnabled('donation')) {
+                    $notifyEmails = notifyRecipients('donation_notify_emails', 'security_notify_emails');
+                    if (!$notifyEmails) $notifyEmails = notifyRecipients('notify_email');
+                } else {
+                    $notifyEmails = [];
+                }
+                if ($notifyEmails) {
                     try {
                         $donor = ($gwName !== '' ? $gwName : ($row['name'] !== '' ? $row['name'] : ($row['email'] !== '' ? $row['email'] : 'Anonymous')));
                         $subject = "💰 New Donation Received — {$row['currency']} " . number_format((float)$row['amount'], 2);
@@ -272,7 +280,9 @@ switch ($method) {
                             . '<tr><td style="background:#f8fafc;padding:10px 16px;color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;">Reference</td></tr>'
                             . '<tr><td style="padding:12px 16px;color:#334155;font-size:13px;font-family:monospace;">' . htmlspecialchars($reference, ENT_QUOTES, 'UTF-8') . '</td></tr>'
                             . '</table>');
-                        queueMailHtml($notifyEmail, $subject, $body, $adminHtml);
+                        foreach ($notifyEmails as $notifyEmail) {
+                            queueMailHtml($notifyEmail, $subject, $body, $adminHtml);
+                        }
                     } catch (Throwable $e) { /* non-fatal */ }
                 }
 

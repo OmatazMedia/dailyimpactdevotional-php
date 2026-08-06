@@ -1,12 +1,14 @@
-import React, { useEffect, useState } from "react";
-import { FileText, Save, Loader2, RefreshCw, Copy, Check, Palette } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { FileText, Save, Loader2, RefreshCw, Copy, Check, Palette, Code2, LayoutTemplate } from "lucide-react";
 import { API_BASE } from "../config/api";
 import { apiPut } from "../lib/api";
+import EmailTemplateBuilder, { blocksToHtml, htmlToBlocks, EmailBlock } from "./EmailTemplateBuilder";
 
 interface Template {
   key: string;
   subject: string;
   body: string;
+  blocks?: string;
 }
 interface Branding {
   siteName: string;
@@ -39,16 +41,77 @@ const LABELS: Record<string, string> = {
   ip_unbanned: "IP Unbanned Alert",
 };
 
+const BLOCK_DEFAULTS: Record<string, EmailBlock[]> = {
+  login_notification: [
+    { id: "b1", type: "heading", text: "New Admin Login Detected", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "A new sign-in was recorded on your publisher portal. If this was not you, click the red button below to sign out every session immediately, then reset your password.", align: "left" },
+    { id: "b3", type: "table", rows: [
+      { label: "Signed-in account", value: "{{login_email}}" },
+      { label: "When", value: "{{login_time}}" },
+      { label: "IP address", value: "{{login_ip}}" },
+      { label: "Location", value: "{{login_location}}" },
+      { label: "Browser", value: "{{login_browser}}" },
+    ] },
+    { id: "b4", type: "button", label: "Log out all sessions", url: "{{secureall_url}}", align: "center" },
+    { id: "b5", type: "text", text: "Wasn't you? Reset your password: {{reset_url}}", align: "left" },
+  ],
+  failed_login_alert: [
+    { id: "b1", type: "heading", text: "⚠️ Failed Admin Login Attempt", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "Someone just tried to sign in with incorrect credentials.", align: "left" },
+    { id: "b3", type: "table", rows: [
+      { label: "Attempted account", value: "{{login_email}}" },
+      { label: "Time", value: "{{login_time}}" },
+      { label: "IP address", value: "{{login_ip}}" },
+      { label: "Location", value: "{{login_location}}" },
+      { label: "Browser", value: "{{login_browser}}" },
+      { label: "Attempts left before ban", value: "{{attempts_remaining}}" },
+    ] },
+  ],
+  donor_receipt: [
+    { id: "b1", type: "heading", text: "🎉 Thank You for Your Gift!", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "Dear {{donor_name}}, we are so grateful for your donation. Your generous support helps us share daily devotionals with people around the world. May God bless you abundantly!", align: "left" },
+    { id: "b3", type: "table", rows: [
+      { label: "Amount", value: "{{donation_currency}} {{donation_amount}}" },
+      { label: "Reference", value: "{{donation_reference}}" },
+      { label: "Date", value: "{{donation_date}}" },
+    ] },
+  ],
+  password_reset: [
+    { id: "b1", type: "heading", text: "Reset Your Password", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "We received a request to reset your publisher portal password. Click the button below to choose a new one.", align: "left" },
+    { id: "b3", type: "button", label: "Reset password", url: "{{reset_url}}", align: "center" },
+    { id: "b4", type: "text", text: "If you didn't request this, you can safely ignore this email.", align: "left" },
+  ],
+  new_ip_ban: [
+    { id: "b1", type: "heading", text: "🚫 New IP Address Banned", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "An IP address was automatically banned after repeated failed login attempts.", align: "left" },
+    { id: "b3", type: "table", rows: [
+      { label: "IP address", value: "{{ban_ip}}" },
+      { label: "Range", value: "{{ban_cidr}}" },
+      { label: "Reason", value: "{{ban_reason}}" },
+    ] },
+  ],
+  ip_unbanned: [
+    { id: "b1", type: "heading", text: "✅ IP Address Unbanned", align: "center", color: "#0f172a" },
+    { id: "b2", type: "text", text: "An IP address was unbanned by an administrator.", align: "left" },
+    { id: "b3", type: "table", rows: [
+      { label: "IP address", value: "{{ban_ip}}" },
+      { label: "Unbanned by", value: "{{unban_by}}" },
+    ] },
+  ],
+};
+
 export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [branding, setBranding] = useState<Branding>({ siteName: "Daily Impact Devotional", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" });
   const [activeKey, setActiveKey] = useState("donor_receipt");
+  const [mode, setMode] = useState<"visual" | "code">("visual");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState("");
 
   const card = `p-6 rounded-2xl border space-y-4 ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-900"}`;
-  const input = `w-full py-2 px-3 border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-sm ${
+  const input = `w-full py-2 px-3 border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-teal-brand/20 ${
     isDarkMode ? "bg-slate-950 border-slate-800 text-white placeholder:text-slate-600" : "bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400"}`;
 
   const load = () => {
@@ -61,7 +124,7 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
           setTemplates(d.templates);
           setActiveKey(prev => d.templates!.some(t => t.key === prev) ? prev : d.templates![0].key);
         }
-        if (d.branding) setBranding({ ...branding, ...d.branding });
+        if (d.branding) setBranding(b => ({ ...b, ...d.branding! }));
       })
       .catch(() => showToast("Unable to load email templates.", "error"))
       .finally(() => setLoading(false));
@@ -71,8 +134,26 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
 
   const active = templates.find(t => t.key === activeKey);
 
+  // Blocks for the active template: saved JSON first, then best-effort HTML parse,
+  // then (for freshly-loaded templates that parse cleanly) nothing — the defaults
+  // below are only offered when the template is brand-new AND unparseable.
+  const activeBlocks = useMemo<EmailBlock[] | null>(() => {
+    if (!active) return null;
+    if (active.blocks) {
+      try {
+        const parsed = JSON.parse(active.blocks);
+        if (Array.isArray(parsed)) return parsed as EmailBlock[];
+      } catch { /* fall through */ }
+    }
+    return htmlToBlocks(active.body);
+  }, [active]);
+
   const updateActive = (patch: Partial<Template>) => {
     setTemplates(prev => prev.map(t => t.key === activeKey ? { ...t, ...patch } : t));
+  };
+
+  const handleBlocksChange = (blocks: EmailBlock[]) => {
+    updateActive({ blocks: JSON.stringify(blocks), body: blocksToHtml(blocks) });
   };
 
   const save = async () => {
@@ -93,6 +174,8 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
     }).catch(() => {});
   };
 
+  const canVisual = activeBlocks !== null;
+
   return (
     <div className={`${card} md:col-span-2`}>
       <div className="flex items-center justify-between gap-3">
@@ -111,12 +194,12 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
       ) : (
         <div className="space-y-4">
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Every automated email is wrapped in a branded, mobile-friendly design — logo header, your content, and a social footer.
-            Edit the subject + body of each template below. Use the <b>token chips</b> to insert live values (donor name, amount, IP, links…).
-            Leaving a field untouched keeps the built-in default.
+            Build each email with the <b>drag-and-drop editor</b> — drag blocks in, click any block to edit its text,
+            colours, buttons and details. Every email is wrapped in the branded shell (logo header + social footer).
+            <b> Leaving a template untouched keeps its built-in default.</b>
           </p>
 
-          {/* Template picker */}
+          {/* Template picker — all templates in one place */}
           <div className="flex flex-wrap gap-1.5">
             {templates.map(t => (
               <button key={t.key} type="button" onClick={() => setActiveKey(t.key)}
@@ -129,31 +212,78 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
 
           {active && (
             <div className="space-y-3">
-              <div className="space-y-1">
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Subject</label>
-                <input type="text" value={active.subject} onChange={e => updateActive({ subject: e.target.value })} className={input} />
-              </div>
-              <div className="space-y-1">
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Body (HTML)</label>
-                <textarea
-                  value={active.body}
-                  onChange={e => updateActive({ body: e.target.value })}
-                  rows={12}
-                  className={`${input} font-mono text-xs leading-relaxed`}
-                />
+              {/* Subject + mode toggle */}
+              <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                <div className="flex-1 space-y-1">
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Subject</label>
+                  <input type="text" value={active.subject} onChange={e => updateActive({ subject: e.target.value })} className={input} />
+                </div>
+                <div className="flex gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 self-start">
+                  <button type="button" onClick={() => setMode("visual")}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
+                      mode === "visual" ? "bg-white dark:bg-slate-800 text-teal-brand shadow-sm" : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"}`}>
+                    <LayoutTemplate className="w-3.5 h-3.5" /> Visual editor
+                  </button>
+                  <button type="button" onClick={() => setMode("code")}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
+                      mode === "code" ? "bg-white dark:bg-slate-800 text-teal-brand shadow-sm" : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"}`}>
+                    <Code2 className="w-3.5 h-3.5" /> Code
+                  </button>
+                </div>
               </div>
 
-              {/* Token chips */}
-              <div className="flex flex-wrap gap-1.5 items-center">
-                <span className="text-[9px] uppercase font-black tracking-wider text-slate-400">Insert:</span>
-                {(TOKEN_HELP[active.key] || []).map(tok => (
-                  <button key={tok} type="button" onClick={() => copyToken(tok)}
-                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border font-mono text-[10px] transition-all ${
-                      copied === tok ? "border-teal-brand text-teal-brand" : isDarkMode ? "border-slate-700 text-slate-300 hover:border-teal-brand/50" : "border-slate-200 text-slate-500 hover:border-teal-brand/50"}`}>
-                    {copied === tok ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} {tok}
-                  </button>
-                ))}
-              </div>
+              {mode === "visual" ? (
+                canVisual ? (
+                  <EmailTemplateBuilder
+                    isDarkMode={isDarkMode}
+                    blocks={activeBlocks}
+                    onChange={handleBlocksChange}
+                    tokens={TOKEN_HELP[active.key] || []}
+                    branding={branding}
+                  />
+                ) : (
+                  <div className={`p-4 rounded-xl border space-y-3 text-[11px] leading-relaxed ${isDarkMode ? "bg-slate-950/50 border-slate-800 text-slate-400" : "bg-slate-50 border-slate-200 text-slate-500"}`}>
+                    <p>
+                      This template's existing HTML can't be automatically converted into visual blocks
+                      (it's already been customised in code). You can keep editing it with the
+                      <b> Code</b> editor, or start a clean visual layout below.
+                    </p>
+                    {BLOCK_DEFAULTS[active.key] && (
+                      <button type="button" onClick={() => { handleBlocksChange(BLOCK_DEFAULTS[active.key]); setMode("visual"); }}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-brand text-white text-[10px] font-black uppercase tracking-wider hover:opacity-90 transition-all">
+                        <LayoutTemplate className="w-3.5 h-3.5" /> Start with a fresh layout
+                      </button>
+                    )}
+                  </div>
+                )
+              ) : (
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">Body (HTML)</label>
+                    <textarea
+                      value={active.body}
+                      onChange={e => {
+                        // Code-mode edits make any saved visual blocks stale —
+                        // clear them so the visual editor re-derives from the
+                        // current HTML instead of silently overwriting on save.
+                        updateActive({ body: e.target.value, blocks: "" });
+                      }}
+                      rows={14}
+                      className={`${input} font-mono text-xs leading-relaxed`}
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 items-center">
+                    <span className="text-[9px] uppercase font-black tracking-wider text-slate-400">Insert:</span>
+                    {(TOKEN_HELP[active.key] || []).map(tok => (
+                      <button key={tok} type="button" onClick={() => copyToken(tok)}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border font-mono text-[10px] transition-all ${
+                          copied === tok ? "border-teal-brand text-teal-brand" : isDarkMode ? "border-slate-700 text-slate-300 hover:border-teal-brand/50" : "border-slate-200 text-slate-500 hover:border-teal-brand/50"}`}>
+                        {copied === tok ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} {tok}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
