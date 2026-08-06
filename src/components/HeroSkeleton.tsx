@@ -15,7 +15,7 @@ export default function HeroSkeleton({ isDarkMode }: HeroSkeletonProps) {
       id="hero-banner-skeleton"
       aria-busy="true"
       aria-label="Loading banner"
-      className={`relative w-full aspect-[16/9] sm:aspect-[21/9] md:aspect-[24/9] lg:aspect-[28/9] min-h-[200px] max-h-[220px] sm:max-h-[340px] md:max-h-[420px] lg:max-h-[520px] overflow-hidden flex items-center justify-center ${
+      className={`relative w-full aspect-[32/5] overflow-hidden bg-slate-950 ${
         isDarkMode ? "bg-slate-900" : "bg-slate-300"
       }`}
     >
