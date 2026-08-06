@@ -211,7 +211,8 @@ CREATE TABLE IF NOT EXISTS `devotional_reaction_votes` (
     `emoji` VARCHAR(32) NOT NULL,
     `ip_hash` CHAR(64) NOT NULL,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY `uk_vote` (`devotional_id`, `emoji`, `ip_hash`),
+    -- One reaction per (devotional, IP): clicking a new emoji replaces the old.
+    UNIQUE KEY `uk_vote` (`devotional_id`, `ip_hash`),
     INDEX `idx_devotional` (`devotional_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

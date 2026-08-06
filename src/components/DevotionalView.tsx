@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Devotional } from "../types";
 import { API_BASE } from "../config/api";
 import { BookOpen, Sparkles, ChevronLeft, ChevronRight, Book, Quote, Share2, X, Link, Check, Mail, Send } from "lucide-react";
@@ -62,6 +62,16 @@ export default function DevotionalView({
   const EMOJIS = ["🙏", "❤️", "🙌", "🔥", "👏"];
   const [reactionCounts, setReactionCounts] = useState<Record<string, number>>({});
   const [userReacted, setUserReacted] = useState<Record<string, boolean>>({});
+  // Serializes reaction POSTs so rapid clicks are seen by the server in the
+  // exact order they happened — prevents racing chains from leaving the
+  // server disagreeing with the UI (e.g. double-click or quick switch).
+  const reactionQueueRef = useRef<Promise<Record<string, number> | null>>(Promise.resolve(null));
+  // Tracks the currently-viewed devotional so stale async responses from a
+  // previously viewed devotional can never overwrite the new one's counts.
+  const activeDevotionalIdRef = useRef<string | undefined>(devotional?.id);
+  useEffect(() => {
+    activeDevotionalIdRef.current = devotional?.id;
+  }, [devotional?.id]);
 
   useEffect(() => {
     if (!devotional?.id) return;
@@ -71,11 +81,14 @@ export default function DevotionalView({
     setReactionCounts({});
     setUserReacted({});
     // Load the REAL persisted reaction counts for this devotional so returning
-    // visitors see the true totals (stored server-side by reactions.php).
+    // visitors see the true totals (stored server-side by reactions.php). The
+    // response also includes "mine" — the single emoji THIS visitor currently
+    // holds — so the selected reaction is restored on reload.
     fetch(`${API_BASE}/reactions.php?devotionalId=${encodeURIComponent(devotional.id)}`)
       .then(r => (r.ok ? r.json() : null))
-      .then((data: { success?: boolean; counts?: Record<string, number> } | null) => {
+      .then((data: { success?: boolean; counts?: Record<string, number>; mine?: string | null } | null) => {
         if (data?.counts) setReactionCounts(data.counts);
+        if (data?.mine) setUserReacted({ [data.mine]: true });
       })
       .catch(() => {});
     fetch(`${API_BASE}/settings.php`)
@@ -87,13 +100,22 @@ export default function DevotionalView({
   }, [devotional?.id]);
 
   const handleReact = (emoji: string) => {
-    const isCurrentlyReacted = !!userReacted[emoji];
+    // Single-selection: a visitor can hold AT MOST ONE reaction per
+    // devotional. Clicking a different emoji replaces the current one;
+    // clicking the active emoji deselects it.
+    const currentlySelected = EMOJIS.find((e) => userReacted[e]);
+    const isCurrentlyReacted = currentlySelected === emoji;
     const newCounts = { ...reactionCounts };
-    const newUserReacted = { ...userReacted };
+    const newUserReacted: Record<string, boolean> = {};
+
+    if (currentlySelected && currentlySelected !== emoji) {
+      // Switching: remove the previous reaction's vote.
+      newCounts[currentlySelected] = Math.max(0, (newCounts[currentlySelected] || 1) - 1);
+    }
 
     if (isCurrentlyReacted) {
+      // Deselect the active reaction.
       newCounts[emoji] = Math.max(0, (newCounts[emoji] || 1) - 1);
-      newUserReacted[emoji] = false;
     } else {
       newCounts[emoji] = (newCounts[emoji] || 0) + 1;
       newUserReacted[emoji] = true;
@@ -102,23 +124,41 @@ export default function DevotionalView({
     setReactionCounts(newCounts);
     setUserReacted(newUserReacted);
 
-    // Persist the vote to the backend (one vote per devotional + emoji + IP;
-    // the server ignores duplicates). On response we adopt the server's real
-    // counts so the UI can never drift from the persisted state.
-    fetch(`${API_BASE}/reactions.php`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        devotionalId: devotional.id,
-        emoji,
-        action: isCurrentlyReacted ? "unreact" : "react",
-      }),
-    })
-      .then(r => (r.ok ? r.json() : null))
-      .then((data: { success?: boolean; counts?: Record<string, number> } | null) => {
-        if (data?.counts) setReactionCounts(data.counts);
-      })
-      .catch(() => {});
+    // Persist to the backend. Switching sends unreact(old) then react(new);
+    // deselecting sends a single unreact. All POSTs are queued through a
+    // shared ref so the server observes them in exact click order even under
+    // rapid clicking — the final response's real counts are adopted.
+    const actions: { emoji: string; action: "react" | "unreact" }[] = [];
+    if (currentlySelected && currentlySelected !== emoji) {
+      actions.push({ emoji: currentlySelected, action: "unreact" });
+    }
+    actions.push({ emoji, action: isCurrentlyReacted ? "unreact" : "react" });
+
+    const devId = devotional.id;
+    const queue = reactionQueueRef.current;
+    const pending = actions.reduce<Promise<Record<string, number> | null>>(
+      (acc, a) =>
+        acc.then(() =>
+          fetch(`${API_BASE}/reactions.php`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              devotionalId: devId,
+              emoji: a.emoji,
+              action: a.action,
+            }),
+          })
+            .then(r => (r.ok ? r.json() : null))
+            .then((data: { counts?: Record<string, number> } | null) => (data?.counts ?? null))
+            .catch(() => null)
+        ),
+      queue
+    );
+    reactionQueueRef.current = pending;
+    pending.then((counts) => {
+      // Only adopt counts if we're still looking at the same devotional.
+      if (counts && activeDevotionalIdRef.current === devId) setReactionCounts(counts);
+    });
   };
 
   // Share URL uses the devotional's date as a human-friendly slug

@@ -241,6 +241,83 @@ app.delete("/api/headers/:dateKey", (req: Request, res: Response) => {
 
 // ─── SETTINGS ───────────────────────────────────────────────────────────────────
 
+// ─── REACTIONS (single-selection mock mirroring reactions.php) ───────────────
+const REACTIONS_FILE = path.join(DATA_DIR, "reactions.json");
+// Store shape: devotionalId -> ipHash -> emoji (one reaction per visitor).
+type ReactionsStore = Record<string, Record<string, string>>;
+function readReactions(): ReactionsStore {
+  return readJson<ReactionsStore>(REACTIONS_FILE, {});
+}
+function writeReactions(store: ReactionsStore): void {
+  writeJson(REACTIONS_FILE, store);
+}
+function reactionCountsFor(store: ReactionsStore, devotionalId: string): Record<string, number> {
+  const byIp = store[devotionalId] || {};
+  const counts: Record<string, number> = {};
+  for (const emoji of Object.values(byIp)) {
+    counts[emoji] = (counts[emoji] || 0) + 1;
+  }
+  return counts;
+}
+// Stable per-visitor id for the dev mock (no real IPs locally).
+function devVisitorId(req: Request): string {
+  const forwarded = (req.headers["x-forwarded-for"] as string | undefined) || "";
+  const ip = forwarded.split(",")[0].trim() || req.socket?.remoteAddress || "127.0.0.1";
+  return crypto.createHash("sha256").update(ip).digest("hex");
+}
+
+// GET counts (+ the single emoji this visitor currently holds)
+app.get("/api/reactions", (req: Request, res: Response) => {
+  if (req.query.all !== undefined && req.query.all !== "") {
+    // All devotionals at once — used by the admin list view.
+    const store = readReactions();
+    const grouped: Record<string, Record<string, number>> = {};
+    for (const [devId] of Object.entries(store)) {
+      grouped[devId] = reactionCountsFor(store, devId);
+    }
+    res.json(grouped);
+    return;
+  }
+  const devotionalId = String(req.query.devotionalId || "");
+  if (!devotionalId) {
+    res.status(400).json({ error: "devotionalId is required" });
+    return;
+  }
+  const store = readReactions();
+  const mine = store[devotionalId]?.[devVisitorId(req)] || null;
+  res.json({
+    success: true,
+    counts: reactionCountsFor(store, devotionalId),
+    mine,
+  });
+});
+
+// POST record a visitor reaction (single-selection: new emoji replaces old)
+app.post("/api/reactions", (req: Request, res: Response) => {
+  const { devotionalId, emoji, action } = req.body as {
+    devotionalId: string;
+    emoji: string;
+    action: "react" | "unreact";
+  };
+  if (!devotionalId || !emoji) {
+    res.status(400).json({ error: "devotionalId and emoji are required" });
+    return;
+  }
+  const store = readReactions();
+  const byIp = store[devotionalId] || (store[devotionalId] = {});
+  if (action === "unreact") {
+    delete byIp[devVisitorId(req)];
+  } else {
+    byIp[devVisitorId(req)] = String(emoji).slice(0, 16); // replaces any previous emoji
+  }
+  writeReactions(store);
+  res.json({
+    success: true,
+    counts: reactionCountsFor(store, devotionalId),
+    mine: store[devotionalId]?.[devVisitorId(req)] || null,
+  });
+});
+
 // GET settings
 app.get("/api/settings", (_req: Request, res: Response) => {
   const data = readJson<object>(SETTINGS_FILE, {

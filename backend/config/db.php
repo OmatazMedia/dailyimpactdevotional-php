@@ -1556,9 +1556,50 @@ function ensureActivityTables(): void {
             emoji VARCHAR(32) NOT NULL,
             ip_hash CHAR(64) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY uk_vote (devotional_id, emoji, ip_hash),
+            UNIQUE KEY uk_vote (devotional_id, ip_hash),
             INDEX idx_devotional (devotional_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        // Single-selection migration: older installs had ONE vote per
+        // (devotional, emoji, IP) — a visitor could hold several reactions on
+        // the same devotional at once. New behavior allows only ONE reaction
+        // per (devotional, IP); clicking a new emoji replaces the old one.
+        // Detect the legacy 3-column key (or a missing key left by a partial
+        // earlier run) and rebuild it idempotently, keeping the visitor's
+        // most recent vote if duplicates exist.
+        $idx = $pdo->query("SHOW INDEX FROM devotional_reaction_votes WHERE Key_name = 'uk_vote'");
+        $keyCols = $idx ? $idx->fetchAll(PDO::FETCH_ASSOC) : [];
+        $hasEmojiInKey = false;
+        foreach ($keyCols as $col) {
+            // Column_name casing differs between MySQL/MariaDB and PDO modes.
+            $colName = strtolower((string)($col['Column_name'] ?? $col['column_name'] ?? ''));
+            if ($colName === 'emoji') {
+                $hasEmojiInKey = true;
+                break;
+            }
+        }
+        // Rebuild if the key still contains emoji (legacy) OR is missing
+        // entirely (a prior DROP succeeded but ADD failed). A correct 2-column
+        // key has exactly devotional_id + ip_hash and no emoji.
+        if ($hasEmojiInKey || count($keyCols) === 0) {
+            // Keep only the newest vote per (devotional, IP) before enforcing
+            // the new unique constraint (dedupe any legacy multi-reactions).
+            $pdo->exec(
+                "DELETE v1 FROM devotional_reaction_votes v1
+                 INNER JOIN devotional_reaction_votes v2
+                    ON v1.devotional_id = v2.devotional_id
+                   AND v1.ip_hash = v2.ip_hash
+                   AND v1.id < v2.id"
+            );
+            // DROP is best-effort: the key may already be gone from a partial
+            // earlier run. If it still exists, remove it; if not, ignore.
+            try {
+                $pdo->exec("ALTER TABLE devotional_reaction_votes DROP INDEX uk_vote");
+            } catch (Throwable $e) {
+                // index may not exist — that's fine, we're about to add it
+            }
+            $pdo->exec("ALTER TABLE devotional_reaction_votes ADD UNIQUE KEY uk_vote (devotional_id, ip_hash)");
+        }
     } catch (Throwable $e) {
         // Tables may not exist yet on brand-new installs — install.php creates them.
         return;

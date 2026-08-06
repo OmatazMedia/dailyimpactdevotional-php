@@ -46,23 +46,38 @@ switch ($method) {
 
         $ipHash = hash('sha256', getClientIp());
 
+        // Single-selection: a visitor can hold AT MOST ONE reaction per
+        // devotional. The unique key is (devotional_id, ip_hash), so:
+        //  - 'react' with a new emoji REPLACES the previously held one
+        //    (ON DUPLICATE KEY UPDATE swaps the emoji in place).
+        //  - 'unreact' removes the single held vote regardless of emoji.
         if ($action === 'unreact') {
             $stmt = $pdo->prepare(
                 "DELETE FROM devotional_reaction_votes
-                 WHERE devotional_id = ? AND emoji = ? AND ip_hash = ?"
+                 WHERE devotional_id = ? AND ip_hash = ?"
             );
-            $stmt->execute([$devotionalId, $emoji, $ipHash]);
+            $stmt->execute([$devotionalId, $ipHash]);
         } else {
             $stmt = $pdo->prepare(
-                "INSERT IGNORE INTO devotional_reaction_votes (devotional_id, emoji, ip_hash)
-                 VALUES (?, ?, ?)"
+                "INSERT INTO devotional_reaction_votes (devotional_id, emoji, ip_hash)
+                 VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE emoji = VALUES(emoji)"
             );
             $stmt->execute([$devotionalId, $emoji, $ipHash]);
         }
 
+        // Which emoji THIS visitor currently holds after the change (used by
+        // the UI to restore the single selected reaction on reload).
+        $stmt = $pdo->prepare(
+            "SELECT emoji FROM devotional_reaction_votes
+             WHERE devotional_id = ? AND ip_hash = ?"
+        );
+        $stmt->execute([$devotionalId, $ipHash]);
+        $mine = $stmt->fetchColumn();
         jsonResponse([
             'success' => true,
             'counts'  => reactionCountsFor($devotionalId),
+            'mine'    => $mine !== false ? (string)$mine : null,
         ]);
         break;
 
@@ -85,9 +100,19 @@ switch ($method) {
         if ($devotionalId === '') {
             jsonError('devotionalId is required', 400);
         }
+        // Tell the UI which emoji THIS visitor already voted (so the single
+        // selected reaction is restored when the page reloads).
+        $ipHash = hash('sha256', getClientIp());
+        $stmt = $pdo->prepare(
+            "SELECT emoji FROM devotional_reaction_votes
+             WHERE devotional_id = ? AND ip_hash = ?"
+        );
+        $stmt->execute([$devotionalId, $ipHash]);
+        $mine = $stmt->fetchColumn();
         jsonResponse([
             'success' => true,
             'counts'  => reactionCountsFor($devotionalId),
+            'mine'    => $mine !== false ? (string)$mine : null,
         ]);
         break;
 
