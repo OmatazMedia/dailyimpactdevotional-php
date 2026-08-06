@@ -25,12 +25,42 @@ $dateLine = '';
 
 if ($devotionalId !== '' && $pdo instanceof PDO) {
     try {
+        // 1) Direct UUID lookup (legacy share links)
         $stmt = $pdo->prepare(
             "SELECT id, date, year, title, scripture_ref, scripture_text, paragraphs, image_url
              FROM devotionals WHERE id = ? LIMIT 1"
         );
         $stmt->execute([$devotionalId]);
         $dev = $stmt->fetch();
+
+        // 2) Date-slug lookup: ?devotional=5-aug-2025
+        if (!$dev && preg_match('/^(\d{1,2})-([a-z]{3})-([0-9]{4})$/i', $devotionalId, $m)) {
+            $day = (int)$m[1];
+            $monthShort = strtolower($m[2]);
+            $year = (int)$m[3];
+            $monthShortToName = [
+                'jan' => 'January', 'feb' => 'February', 'mar' => 'March', 'apr' => 'April',
+                'may' => 'May', 'jun' => 'June', 'jul' => 'July', 'aug' => 'August',
+                'sep' => 'September', 'oct' => 'October', 'nov' => 'November', 'dec' => 'December',
+            ];
+            if (isset($monthShortToName[$monthShort])) {
+                // Match by year, then filter in PHP (handles both "August 5" and "5 August" formats).
+                $stmt = $pdo->prepare(
+                    "SELECT id, date, year, title, scripture_ref, scripture_text, paragraphs, image_url
+                     FROM devotionals WHERE year = ?"
+                );
+                $stmt->execute([$year]);
+                while ($row = $stmt->fetch()) {
+                    $parts = parseDateParts((string)($row['date'] ?? ''));
+                    if (isset($parts['month'], $parts['day'])
+                        && strtolower(substr($parts['month'], 0, 3)) === $monthShort
+                        && (int)$parts['day'] === $day) {
+                        $dev = $row;
+                        break;
+                    }
+                }
+            }
+        }
     } catch (Throwable $e) {
         $dev = null;
     }
@@ -41,8 +71,11 @@ $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' :
 $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
 $base   = $scheme . '://' . $host;
 
-// Resolve the share image: devotional image_url → mapped header for its date → default.
-$imageUrl = $base . '/assets/images/devotional-title-default.jpg';
+// Resolve the share image: devotional image_url → mapped header for its date → logo.
+// The logo (dailyimpact.png) ships with every install, so the card ALWAYS has an image
+// on any domain the app is deployed on.
+$imageUrl = $base . '/assets/images/dailyimpact.png';
+$isLogo = true; // tracks whether the emitted image is the square logo (type/dimensions below)
 $shareUrl = $base . '/';
 
 if ($dev) {
@@ -69,10 +102,23 @@ if ($dev) {
 
     $shareUrl = $base . '/?devotional=' . rawurlencode((string)$dev['id']);
 
-    // 1) Devotional's own image
+    // Prefer the date-slug URL (matches the actual share links the SPA emits,
+    // e.g. ?devotional=5-aug-2025) so crawlers cache the card under the SAME
+    // URL people share — avoids split preview caches between slug and UUID.
+    $devParts = parseDateParts((string)($dev['date'] ?? ''));
+    if (isset($devParts['month'], $devParts['day']) && (int)($dev['year'] ?? 0) > 0) {
+        $shareUrl = $base . '/?devotional=' . (int)$devParts['day'] . '-' . strtolower(substr($devParts['month'], 0, 3)) . '-' . (int)$dev['year'];
+    }
+
+    // 1) Devotional's own image (absolute or site-relative — always emit an absolute URL)
     $ownImage = trim((string)($dev['image_url'] ?? ''));
-    if ($ownImage !== '' && str_starts_with($ownImage, 'http')) {
-        $imageUrl = $ownImage;
+    if ($ownImage !== '') {
+        if (str_starts_with($ownImage, 'http')) {
+            $imageUrl = $ownImage;
+        } else {
+            $imageUrl = $base . '/' . ltrim($ownImage, '/');
+        }
+        $isLogo = false;
     } else {
         // 2) Mapped header image for the devotional's date
         $parts = parseDateParts((string)($dev['date'] ?? ''));
@@ -84,7 +130,10 @@ if ($dev) {
             $header = $stmt->fetch();
             if ($header) {
                 if (!empty($header['file_path'])) {
-                    $imageUrl = $base . '/' . ltrim((string)$header['file_path'], '/');
+                    // Encode every path segment (paths can contain spaces, e.g. "devotional headers/…")
+                    // so crawlers receive a valid image URL.
+                    $imageUrl = $base . '/' . implode('/', array_map('rawurlencode', explode('/', ltrim((string)$header['file_path'], '/'))));
+                    $isLogo = false;
                 } elseif (!empty($header['data_url']) && str_starts_with((string)$header['data_url'], 'data:image')) {
                     // Persist base64 mapping to a temp file so crawlers can read it.
                     $base64Data = preg_replace('/^data:image\/\w+;base64,/', '', (string)$header['data_url']);
@@ -94,6 +143,7 @@ if ($dev) {
                         @file_put_contents($tmpFile, base64_decode((string)$base64Data));
                     }
                     $imageUrl = $base . '/upload/headers/tmp/tmp_' . strtolower($parts['month']) . '_' . $parts['day'] . '.jpg';
+                    $isLogo = false;
                 }
             }
         } catch (Throwable $e) {
@@ -129,8 +179,9 @@ $refresh = htmlspecialchars($shareUrl, ENT_QUOTES, 'UTF-8');
     <meta property="og:description" content="<?= $ogDesc ?>" />
     <meta property="og:image" content="<?= $ogImage ?>" />
     <meta property="og:image:secure_url" content="<?= $ogImage ?>" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="<?= $isLogo ? 'image/png' : 'image/jpeg' ?>" />
+    <meta property="og:image:width" content="<?= $isLogo ? '512' : '1200' ?>" />
+    <meta property="og:image:height" content="<?= $isLogo ? '512' : '630' ?>" />
     <meta property="og:image:alt" content="<?= $ogTitle ?>" />
     <meta property="og:url" content="<?= $ogUrl ?>" />
     <meta property="og:locale" content="en_NG" />
@@ -140,6 +191,7 @@ $refresh = htmlspecialchars($shareUrl, ENT_QUOTES, 'UTF-8');
     <meta name="twitter:title" content="<?= $ogTitle ?>" />
     <meta name="twitter:description" content="<?= $ogDesc ?>" />
     <meta name="twitter:image" content="<?= $ogImage ?>" />
+    <meta name="twitter:image:type" content="<?= $isLogo ? 'image/png' : 'image/jpeg' ?>" />
     <meta name="twitter:image:alt" content="<?= $ogTitle ?>" />
 
     <link rel="canonical" href="<?= $ogUrl ?>" />

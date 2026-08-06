@@ -47,7 +47,7 @@ RewriteRule ^backend/ - [L]
 # Telegram, Facebook and Twitter/X show the devotional's OWN banner image and
 # title in the preview card. Real browsers (no matching UA) continue to the SPA.
 RewriteCond %{QUERY_STRING} (^|&)devotional=[^&]+ [NC]
-RewriteCond %{HTTP_USER_AGENT} (facebookexternalhit|Facebot|Twitterbot|WhatsApp|TelegramBot|LinkedInBot|Slackbot|Discordbot|Pinterest|vkShare|redditbot|Applebot|Googlebot) [NC]
+RewriteCond %{HTTP_USER_AGENT} (facebookexternalhit|Facebot|Twitterbot|WhatsApp|TelegramBot|LinkedInBot|Slackbot|Discordbot|Pinterest|vkShare|redditbot|Applebot|Googlebot|Instagram) [NC]
 RewriteRule ^$ /backend/api/og.php [L,QSA]
 
 # ─── FILE UPLOADS ───────────────────────────────────────────────────────────

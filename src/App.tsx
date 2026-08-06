@@ -452,15 +452,37 @@ export default function App() {
       setMeta("og:url", `${window.location.origin}?devotional=${slugForDevotional(selectedDevotional.date, selectedDevotional.year) || selectedDevotional.id}`);
       setName("twitter:title", t);
       setName("twitter:description", desc);
-      if (selectedDevotional.imageUrl) {
-        const img = selectedDevotional.imageUrl.startsWith("http")
-          ? selectedDevotional.imageUrl
-          : `${window.location.origin}${selectedDevotional.imageUrl}`;
-        setMeta("og:image", img);
-        setName("twitter:image", img);
-      }
+      // Always emit an absolute, existing image: the devotional's own image when
+      // present, otherwise the bundled logo (ships on every install/domain).
+      const logo = `${window.location.origin}/assets/images/dailyimpact.png`;
+      const img = selectedDevotional.imageUrl
+        ? (selectedDevotional.imageUrl.startsWith("http")
+            ? selectedDevotional.imageUrl
+            : `${window.location.origin}${selectedDevotional.imageUrl.startsWith("/") ? "" : "/"}${selectedDevotional.imageUrl}`)
+        : logo;
+      const isLogo = img === logo;
+      setMeta("og:image", img);
+      setMeta("og:image:secure_url", img);
+      setMeta("og:image:type", isLogo ? "image/png" : "image/jpeg");
+      setMeta("og:image:width", isLogo ? "512" : "1200");
+      setMeta("og:image:height", isLogo ? "512" : "630");
+      setName("twitter:image", img);
     } else {
+      // Homepage — reset to the site defaults (logo OG image) so a stale
+      // devotional image never lingers after navigating back home.
+      const logo = `${window.location.origin}/assets/images/dailyimpact.png`;
       document.title = "Daily Impact Devotional | Dr. Andy Osakwe";
+      setMeta("og:title", "Daily Impact Devotional | Dr. Andy Osakwe");
+      setMeta("og:description", "Start every day with God's Word. Daily scripture readings, prayer confessions, and spirit-filled teachings by Dr. Andy Osakwe of Andrew Osakwe Ministries International.");
+      setMeta("og:url", window.location.origin);
+      setMeta("og:image", logo);
+      setMeta("og:image:secure_url", logo);
+      setMeta("og:image:type", "image/png");
+      setMeta("og:image:width", "512");
+      setMeta("og:image:height", "512");
+      setName("twitter:title", "Daily Impact Devotional | Dr. Andy Osakwe");
+      setName("twitter:description", "Start every day with God's Word. Daily scripture readings, prayer confessions, and spirit-filled teachings by Dr. Andy Osakwe.");
+      setName("twitter:image", logo);
     }
   }, [selectedDevotional]);
 
