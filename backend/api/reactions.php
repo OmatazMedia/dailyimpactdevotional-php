@@ -16,6 +16,59 @@ require_once __DIR__ . '/../config/db.php';
 sendCorsHeaders();
 ensureActivityTables();
 
+/**
+ * Single-selection migration — self-contained so it runs even when a cPanel
+ * install still has an older config/db.php (which won't carry the migration).
+ * Older installs had ONE vote per (devotional, emoji, IP); the new contract is
+ * ONE vote per (devotional, IP) with the emoji replaced on re-react. Detects
+ * the legacy 3-column unique key (or a missing key from a partial earlier run)
+ * and rebuilds it idempotently, keeping the visitor's most recent vote.
+ * Runs once per PHP process (reactions.php is a hot public endpoint).
+ */
+function ensureSingleSelectionReactionKey(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) return;
+    static $checked = false;
+    if ($checked) return;
+    try {
+        $idx = $pdo->query("SHOW INDEX FROM devotional_reaction_votes WHERE Key_name = 'uk_vote'");
+        $keyCols = $idx ? $idx->fetchAll(PDO::FETCH_ASSOC) : [];
+        $hasEmojiInKey = false;
+        foreach ($keyCols as $col) {
+            // Column_name casing differs between MySQL/MariaDB and PDO modes.
+            $colName = strtolower((string)($col['Column_name'] ?? $col['column_name'] ?? ''));
+            if ($colName === 'emoji') {
+                $hasEmojiInKey = true;
+                break;
+            }
+        }
+        // Rebuild if the key still contains emoji (legacy) OR is missing
+        // entirely (a prior DROP succeeded but ADD failed).
+        if ($hasEmojiInKey || count($keyCols) === 0) {
+            // Keep only the newest vote per (devotional, IP) before enforcing
+            // the new unique constraint (dedupe any legacy multi-reactions).
+            $pdo->exec(
+                "DELETE v1 FROM devotional_reaction_votes v1
+                 INNER JOIN devotional_reaction_votes v2
+                    ON v1.devotional_id = v2.devotional_id
+                   AND v1.ip_hash = v2.ip_hash
+                   AND v1.id < v2.id"
+            );
+            try {
+                $pdo->exec("ALTER TABLE devotional_reaction_votes DROP INDEX uk_vote");
+            } catch (Throwable $e) {
+                // index may not exist — that's fine, we're about to add it
+            }
+            $pdo->exec("ALTER TABLE devotional_reaction_votes ADD UNIQUE KEY uk_vote (devotional_id, ip_hash)");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a brand-new install — install.php creates it.
+        return;
+    }
+    $checked = true;
+}
+ensureSingleSelectionReactionKey();
+
 function reactionCountsFor(string $devotionalId): array {
     global $pdo;
     $stmt = $pdo->prepare(

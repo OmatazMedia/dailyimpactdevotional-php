@@ -72,10 +72,36 @@ try {
 
 // ─── CORS Headers ───────────────────────────────────────────────────────────
 function sendCorsHeaders(): void {
-    header('Access-Control-Allow-Origin: *');
+    // CORS: only reflect an Origin that matches this site (or local dev), never
+    // a wildcard — a wildcard would let ANY website read API responses and ride
+    // cookie-authenticated requests. Same-origin requests (the normal case) are
+    // unaffected.
+    $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
+    $host   = (string)($_SERVER['HTTP_HOST'] ?? '');
+    if ($origin !== '') {
+        // Vary on Origin whenever an Origin is present (cache correctness).
+        header('Vary: Origin');
+        $oHost = (string)parse_url($origin, PHP_URL_HOST);
+        $hostNoPort = preg_replace('/:\d+$/', '', $host);
+        // The localhost carve-out is dev convenience only; it is safe because
+        // the session cookie is SameSite=Lax (withheld on cross-site fetch).
+        // If a cookie ever becomes SameSite=None or a Bearer token is added,
+        // remove the $isLocal allowance.
+        $isLocal = (bool)preg_match('/^(localhost|127\.0\.0\.1|\[::1\])$/i', $oHost);
+        if ($oHost !== '' && ($isLocal || ($hostNoPort !== null && strcasecmp($oHost, $hostNoPort) === 0))) {
+            header('Access-Control-Allow-Origin: ' . $origin);
+            header('Access-Control-Allow-Credentials: true');
+        }
+    }
     header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
     header('Access-Control-Allow-Headers: Content-Type, Authorization');
     header('Content-Type: application/json; charset=utf-8');
+
+    // Hardening headers — clickjacking, MIME sniffing, referrer leakage.
+    header('X-Frame-Options: SAMEORIGIN');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()');
 
     // API responses must never be cached by the browser/proxy — otherwise a
     // stale GET /devotionals.php response can resurrect a row the admin just
@@ -86,6 +112,56 @@ function sendCorsHeaders(): void {
     if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
         http_response_code(200);
         exit;
+    }
+}
+
+// ─── Webhook Flood Guard ────────────────────────────────────────────────────
+// Payment gateways retry webhooks; forged/rogue clients should be throttled.
+// Signature verification (webhook-payment.php) is the PRIMARY control — this
+// guard is defense-in-depth and best-effort (never blocks on guard errors).
+function ensureWebhookGuard(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS webhook_events (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            ip_address VARCHAR(45) NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_wh_ip_time (ip_address, created_at)
+        ) ENGINE=InnoDB");
+    } catch (Throwable $e) {
+        // Non-fatal — the guard is best-effort.
+    }
+}
+
+function webhookAllowed(string $ip, int $maxPerMinute = 15): bool {
+    global $pdo;
+    if ($ip === '' || !$pdo instanceof PDO) {
+        return true;
+    }
+    try {
+        // Prune old rows, then count this IP's requests in the last minute.
+        $pdo->exec("DELETE FROM webhook_events WHERE created_at < NOW() - INTERVAL 10 MINUTE");
+        $stmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM webhook_events
+             WHERE ip_address = ? AND created_at >= NOW() - INTERVAL 1 MINUTE"
+        );
+        $stmt->execute([$ip]);
+        if ((int)$stmt->fetchColumn() >= $maxPerMinute) {
+            return false;
+        }
+        $ins = $pdo->prepare("INSERT INTO webhook_events (ip_address) VALUES (?)");
+        $ins->execute([$ip]);
+        return true;
+    } catch (Throwable $e) {
+        return true; // Fail-open only on guard errors — signature check still protects.
     }
 }
 
@@ -449,15 +525,21 @@ function encryptSecret(string $plain): string {
     $iv  = random_bytes(16);
     $cipher = openssl_encrypt($plain, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
     if ($cipher === false) {
-        // openssl missing — store plaintext rather than lose the value.
-        return $plain;
+        // openssl missing — never silently downgrade. Mark the value explicitly
+        // and log loudly so the ops team knows secrets are NOT encrypted at rest.
+        error_log('CRYPTO WARNING: openssl_encrypt failed — storing secret with plain: marker (not encrypted at rest).');
+        return 'plain:' . $plain;
     }
     return 'enc:v1:' . base64_encode($iv . $cipher);
 }
 
-/** Decrypt a stored secret. Handles plaintext (legacy) and empty values. */
+/** Decrypt a stored secret. Handles plaintext (legacy), explicit plain: markers and empty values. */
 function decryptSecret(string $stored): string {
     if ($stored === '' || !str_starts_with($stored, 'enc:v1:')) {
+        // Explicit plaintext marker (crypto downgrade) — strip the prefix.
+        if (str_starts_with($stored, 'plain:')) {
+            return substr($stored, 6);
+        }
         return $stored; // empty or legacy plaintext
     }
     $raw = base64_decode(substr($stored, 7), true);
@@ -652,6 +734,7 @@ function ensureBanTable(): void {
                 email VARCHAR(255) DEFAULT '',
                 failed_attempts INT DEFAULT 0,
                 active TINYINT(1) DEFAULT 1,
+                whitelisted TINYINT(1) NOT NULL DEFAULT 0,
                 unbanned_at TIMESTAMP NULL,
                 unbanned_by VARCHAR(255) DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -660,6 +743,11 @@ function ensureBanTable(): void {
                 INDEX idx_ip_address (ip_address)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
+        // Add the whitelisted column on existing installs (idempotent).
+        $bCols = $pdo->query("SHOW COLUMNS FROM ip_bans")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('whitelisted', $bCols, true)) {
+            $pdo->exec("ALTER TABLE ip_bans ADD COLUMN whitelisted TINYINT(1) NOT NULL DEFAULT 0 AFTER active");
+        }
 
         // ── Schema self-heal (ban → unban → re-ban → unban) ───────────────
         // The original schema used UNIQUE KEY uk_cidr_active (cidr, active),
@@ -696,6 +784,32 @@ function ensureBanTable(): void {
     }
 }
 
+function isIpWhitelisted(string $ip): bool {
+    global $pdo;
+    if (!$pdo) {
+        return false;
+    }
+    ensureBanTable();
+    $version = ipVersion($ip);
+    try {
+        $stmt = $pdo->prepare(
+            "SELECT * FROM ip_bans
+             WHERE active = 1 AND whitelisted = 1
+             AND ip_version = ?
+             ORDER BY created_at DESC"
+        );
+        $stmt->execute([$version]);
+        while ($ban = $stmt->fetch()) {
+            if (isIpInRange($ip, (string)($ban['ban_start'] ?? ''), (string)($ban['ban_end'] ?? ''))) {
+                return true;
+            }
+        }
+    } catch (Throwable $e) {
+        return false;
+    }
+    return false;
+}
+
 function getBanForIp(string $ip): ?array {
     global $pdo;
     if (!$pdo) {
@@ -706,6 +820,7 @@ function getBanForIp(string $ip): ?array {
     $stmt = $pdo->prepare(
         "SELECT * FROM ip_bans
          WHERE active = 1
+         AND whitelisted = 0
          AND ip_version = ?
          ORDER BY created_at DESC"
     );
@@ -721,16 +836,107 @@ function getBanForIp(string $ip): ?array {
 }
 
 function queueMail(string $to, string $subject, string $body): void {
+    queueMailHtml($to, $subject, $body, '');
+}
+
+// ─── Transactional Email Engine (branded HTML templates + queue) ────────────
+// Emails are queued to mail_queue (plain-text body + optional branded HTML),
+// sent by the cron worker (send-mail.php) using the PRIMARY transport with the
+// secondary as automatic fallback. Templates are overridable from the admin
+// dashboard (email_template_<key>_subject / _body settings) and every email is
+// wrapped in a branded, responsive HTML shell (logo header + social footer).
+
+/** Idempotently add the html column to mail_queue (fresh + existing installs). */
+function ensureMailQueueHtmlColumn(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM mail_queue")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('html', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN html MEDIUMTEXT NULL AFTER body");
+        }
+        if (!in_array('from_email', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN from_email VARCHAR(255) DEFAULT NULL AFTER html");
+        }
+        if (!in_array('from_name', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN from_name VARCHAR(120) DEFAULT NULL AFTER from_email");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
+/**
+ * Queue a transactional email — plain-text body plus an optional branded HTML
+ * body. Per-row From identity is supported (used by donation receipts) and
+ * falls back to the global identity when omitted.
+ */
+function queueMailHtml(string $to, string $subject, string $body, string $html = '', ?string $fromName = null, ?string $fromEmail = null): void {
     global $pdo;
     if (!$pdo || empty($to)) {
         return;
     }
+    ensureMailQueueHtmlColumn();
     try {
-        $stmt = $pdo->prepare("INSERT INTO mail_queue (id, to_email, subject, body, sent) VALUES (?, ?, ?, ?, 0)");
-        $stmt->execute([generateId(), $to, $subject, $body]);
+        $stmt = $pdo->prepare(
+            "INSERT INTO mail_queue (id, to_email, subject, body, html, from_email, from_name, sent) VALUES (?, ?, ?, ?, ?, ?, ?, 0)"
+        );
+        $stmt->execute([generateId(), $to, $subject, $body, $html, $fromEmail, $fromName]);
     } catch (Throwable $e) {
         // Never break the caller over a best-effort email queue.
     }
+}
+
+/** Build an absolute URL from the current request host (emails need absolute links). */
+function siteAbsoluteUrl(string $path = ''): string {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return $scheme . '://' . $host . '/' . ltrim($path, '/');
+}
+
+/** Resolve the site logo URL used in the branded email header (setting overrides packaged logo). */
+function siteLogoUrl(): string {
+    $logo = trim((string)getSetting('site_logo_url', ''));
+    if ($logo !== '') {
+        return str_starts_with($logo, 'http') || str_starts_with($logo, 'data:') ? $logo : siteAbsoluteUrl($logo);
+    }
+    return siteAbsoluteUrl('assets/images/dailyimpact.png');
+}
+
+/** Social profile URLs used in the branded email footer (settings overridable). */
+function emailSocialLinks(): array {
+    return [
+        'facebook'  => (string)getSetting('social_facebook', 'https://facebook.com/andrewosakwe'),
+        'twitter'   => (string)getSetting('social_twitter', 'https://twitter.com/andrewosakwe'),
+        'instagram' => (string)getSetting('social_instagram', 'https://instagram.com/andrewosakwe'),
+        'youtube'   => (string)getSetting('social_youtube', 'https://youtube.com/andrewosakwe'),
+    ];
+}
+
+/**
+ * The From identity ({name} <{email}>). Donation-specific override applies when
+ * $scope === 'donation' and the admin configured one; otherwise the general
+ * identity (resend_from_name / resend_from_email) is used everywhere.
+ */
+function emailFromIdentity(string $scope = 'general'): array {
+    $name  = (string)getSetting('resend_from_name', 'Daily Impact Devotional');
+    $email = (string)getSetting('resend_from_email', '');
+    if ($scope === 'donation') {
+        $dName  = (string)getSetting('donation_from_name', '');
+        $dEmail = (string)getSetting('donation_from_email', '');
+        if ($dEmail !== '') {
+            $name  = $dName !== '' ? $dName : $name;
+            $email = $dEmail;
+        }
+    }
+    return ['name' => $name, 'email' => $email];
 }
 
 /**
@@ -783,6 +989,10 @@ function ensureLoginLogTable(): void {
 function recordIpBan(string $ip, string $reason, string $email = '', int $failedAttempts = 0, string $source = 'admin-login'): ?array {
     global $pdo;
     if (!$pdo) {
+        return null;
+    }
+    // Whitelisted IPs are never banned — an admin explicitly allowed them.
+    if (isIpWhitelisted($ip)) {
         return null;
     }
     $cidr = normalizeSubnet($ip);
@@ -921,8 +1131,14 @@ function regenerateSession(): void {
 }
 
 /**
- * Bind session to client IP and User-Agent.
- * Returns true if the session fingerprint matches.
+ * Bind session to client identity (User-Agent + IP subnet) and return true
+ * if the session fingerprint matches.
+ *
+ * Subnet-level (instead of exact-IP) binding keeps sessions alive behind
+ * Cloudflare / rotating proxy edges and IPv6 privacy extensions, where the
+ * exact remote address can legitimately change between requests — previously
+ * that destroyed sessions and made admin-only data (like decrypted Telegram
+ * credentials in settings.php) "disappear" after reload/logout.
  */
 function sessionFingerprint(): string {
     $ip = getClientIp();
@@ -966,12 +1182,52 @@ function secureSession(int $maxIdleSeconds = 3600): bool {
         return false;
     }
 
+    // Absolute lifetime cap: even with constant activity, a session dies after
+    // 24 hours. A stolen session cookie can never stay valid indefinitely.
+    $sessionCreated = (int)($_SESSION['created_at'] ?? 0);
+    if ($sessionCreated > 0 && (time() - $sessionCreated) > 86400) {
+        $_SESSION = [];
+        session_destroy();
+        return false;
+    }
+
     // Validate fingerprint binding
     if (!validateSessionBinding()) {
         // Possible hijack — destroy session
         $_SESSION = [];
         session_destroy();
         return false;
+    }
+
+    // Hard ban guard: a banned IP loses admin access EVEN with a live session.
+    // This backs up the login-gate check so a ban takes effect instantly on
+    // every admin API call (dashboard, settings, telegram, payments, ...),
+    // while the public website stays fully browsable for that IP.
+    $ban = getBanForIp(getClientIp());
+    if ($ban !== null) {
+        $_SESSION = [];
+        session_destroy();
+        return false;
+    }
+
+    // Session-version guard: when an admin bumps session_version ("log out all
+    // sessions" from the login-notification email), every pre-existing session
+    // for that user becomes invalid and is destroyed on its next API call.
+    if (!empty($_SESSION['admin_id'])) {
+        try {
+            ensureSessionVersionColumn();
+            $stmt = $pdo->prepare("SELECT session_version FROM admin_users WHERE id = ?");
+            $stmt->execute([$_SESSION['admin_id']]);
+            $current = $stmt->fetchColumn();
+            if ($current !== false && (int)$current !== (int)($_SESSION['admin_session_version'] ?? 0)) {
+                $_SESSION = [];
+                session_destroy();
+                return false;
+            }
+        } catch (Throwable $e) {
+            // Version column may not exist yet on a partially-migrated DB —
+            // never lock admins out over the version check.
+        }
     }
 
     return true;
@@ -1133,6 +1389,65 @@ function consumeBackupCode(array $admin, string $code): ?int {
     return count($hashes);
 }
 
+/**
+ * Shared alert throttle: returns TRUE when an alert may be sent now (not
+ * throttled) and records the send. The map lives in one settings key and is
+ * pruned to 7 days so the settings table never grows unbounded. Used by the
+ * failed-login email alerts (admin.php + login-log.php) to stop an attacker
+ * flooding admin inboxes.
+ */
+function alertNotThrottled(string $mapKey, string $subjectHash, int $windowSec = 1800): bool
+{
+    try {
+        $saved = getSetting($mapKey, '{}');
+        $map = json_decode((string)$saved, true);
+        if (!is_array($map)) {
+            $map = [];
+        }
+        $now = time();
+        foreach ($map as $k => $ts) {
+            if ($now - (int)$ts > 604800) unset($map[$k]);
+        }
+        if (isset($map[$subjectHash]) && ($now - (int)$map[$subjectHash]) < $windowSec) {
+            return false;
+        }
+        $map[$subjectHash] = $now;
+        setSetting($mapKey, json_encode($map));
+        return true;
+    } catch (Throwable $e) {
+        return true; // never block an alert because of storage problems
+    }
+}
+
+/**
+ * Idempotently add the session_version column to admin_users.
+ *
+ * session_version powers "log out all sessions": bumping it invalidates every
+ * existing PHP session for that user, because secureSession() compares the
+ * version stored in the session against the user's row and destroys the
+ * session on mismatch. Sessions themselves are file-based on cPanel, so they
+ * can't be enumerated — the version stamp is the reliable way to revoke them.
+ */
+function ensureSessionVersionColumn(): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM admin_users")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('session_version', $cols, true)) {
+            $pdo->exec("ALTER TABLE admin_users ADD COLUMN session_version INT NOT NULL DEFAULT 0 AFTER backup_codes");
+        }
+    } catch (Throwable $e) {
+        // Table may not exist yet on a fresh install — install.php creates it.
+    }
+}
+
 /** Current 2FA status for an admin_users row. */
 function twofaStatusForUser(array $admin): array {
     $methods = [];
@@ -1163,10 +1478,12 @@ function establishAdminSession(array $admin): void {
     $_SESSION['admin_id']            = $admin['id'];
     $_SESSION['admin_email']         = $admin['email'];
     $_SESSION['admin_name']          = $admin['name'];
+    $_SESSION['admin_bio']           = (string)($admin['bio'] ?? '');
     $_SESSION['admin_role']          = $admin['role'];
     $_SESSION['session_fingerprint'] = $fingerprint;
     $_SESSION['last_activity']       = time();
     $_SESSION['created_at']          = time();
+    $_SESSION['admin_session_version'] = (int)($admin['session_version'] ?? 0);
     unset(
         $_SESSION['pending_2fa'],
         $_SESSION['2fa_attempts'],
@@ -1239,9 +1556,50 @@ function ensureActivityTables(): void {
             emoji VARCHAR(32) NOT NULL,
             ip_hash CHAR(64) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY uk_vote (devotional_id, emoji, ip_hash),
+            UNIQUE KEY uk_vote (devotional_id, ip_hash),
             INDEX idx_devotional (devotional_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        // Single-selection migration: older installs had ONE vote per
+        // (devotional, emoji, IP) — a visitor could hold several reactions on
+        // the same devotional at once. New behavior allows only ONE reaction
+        // per (devotional, IP); clicking a new emoji replaces the old one.
+        // Detect the legacy 3-column key (or a missing key left by a partial
+        // earlier run) and rebuild it idempotently, keeping the visitor's
+        // most recent vote if duplicates exist.
+        $idx = $pdo->query("SHOW INDEX FROM devotional_reaction_votes WHERE Key_name = 'uk_vote'");
+        $keyCols = $idx ? $idx->fetchAll(PDO::FETCH_ASSOC) : [];
+        $hasEmojiInKey = false;
+        foreach ($keyCols as $col) {
+            // Column_name casing differs between MySQL/MariaDB and PDO modes.
+            $colName = strtolower((string)($col['Column_name'] ?? $col['column_name'] ?? ''));
+            if ($colName === 'emoji') {
+                $hasEmojiInKey = true;
+                break;
+            }
+        }
+        // Rebuild if the key still contains emoji (legacy) OR is missing
+        // entirely (a prior DROP succeeded but ADD failed). A correct 2-column
+        // key has exactly devotional_id + ip_hash and no emoji.
+        if ($hasEmojiInKey || count($keyCols) === 0) {
+            // Keep only the newest vote per (devotional, IP) before enforcing
+            // the new unique constraint (dedupe any legacy multi-reactions).
+            $pdo->exec(
+                "DELETE v1 FROM devotional_reaction_votes v1
+                 INNER JOIN devotional_reaction_votes v2
+                    ON v1.devotional_id = v2.devotional_id
+                   AND v1.ip_hash = v2.ip_hash
+                   AND v1.id < v2.id"
+            );
+            // DROP is best-effort: the key may already be gone from a partial
+            // earlier run. If it still exists, remove it; if not, ignore.
+            try {
+                $pdo->exec("ALTER TABLE devotional_reaction_votes DROP INDEX uk_vote");
+            } catch (Throwable $e) {
+                // index may not exist — that's fine, we're about to add it
+            }
+            $pdo->exec("ALTER TABLE devotional_reaction_votes ADD UNIQUE KEY uk_vote (devotional_id, ip_hash)");
+        }
     } catch (Throwable $e) {
         // Tables may not exist yet on brand-new installs — install.php creates them.
         return;
