@@ -107,7 +107,6 @@ switch ($method) {
             $settings = getSettings();
             $botToken  = $settings['telegram_bot_token'] ?? '';
             $channelId = $settings['telegram_channel_id'] ?? '';
-            $footerText = $settings['telegram_footer_text'] ?? 'Join our Telegram channel for daily impact! 📖🔥';
 
             if (empty($botToken) || empty($channelId)) {
                 jsonError('Bot token and channel ID must be configured in Settings', 400);
@@ -172,7 +171,7 @@ switch ($method) {
             // Build Telegram messages — date first, then bold title (same order
             // as the homepage header), and the body mirrors the homepage:
             // Scripture → paragraphs → Additional Scripture → Prayer &
-            // Confession → One Year Bible Reading → footer.
+            // Confession → One Year Bible Reading.
             $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
 
             // Step 1: Send photo (caption carries the date + title)
@@ -181,7 +180,7 @@ switch ($method) {
             // Step 2: Send body text — starts at the Scripture section. The
             // date + title header is only re-added if the photo (which carried
             // them in its caption) failed to post.
-            $bodyText = buildDevotionalBody($dev, $footerText, $result['success']);
+            $bodyText = buildDevotionalBody($dev, !$result['success']);
             $textResult = sendTelegramMessage($botToken, $channelId, $bodyText);
 
             $finalSuccess = $textResult['success'] || $result['success'];
@@ -454,9 +453,6 @@ function resolveImageUrl(array $dev): string {
  *   <b>DAILY BIBLE READING:</b>
  *   value
  *
- *   —
- *   footer
- *
  * All section labels are bold, matching the homepage's bold section headings.
  * Stays within Telegram's 4096-char sendMessage limit; long paragraphs are
  * truncated only if they would push out the labelled sections below.
@@ -481,10 +477,9 @@ function tgUpper(string $text): string {
     return function_exists('mb_strtoupper') ? mb_strtoupper($text, 'UTF-8') : strtoupper($text);
 }
 
-function buildDevotionalBody(array $dev, string $footerText, bool $includeHeader = true): string {
+function buildDevotionalBody(array $dev, bool $includeHeader = true): string {
     $maxLen = 4096;
-    $reserve = mb_strlen($footerText) + 40; // footer + separator + slack
-    $budget = $maxLen - $reserve;
+    $budget = $maxLen;
 
     $sections = [];
 
@@ -539,7 +534,6 @@ function buildDevotionalBody(array $dev, string $footerText, bool $includeHeader
         }
     }
 
-    if ($footerText) $body .= "\n\n—\n" . $footerText;
     return mb_substr($body, 0, $maxLen);
 }
 
@@ -563,7 +557,6 @@ function tgRunCronTick(): array
     $botToken   = $settings['telegram_bot_token'] ?? '';
     $channelId  = $settings['telegram_channel_id'] ?? '';
     $postTime   = $settings['telegram_post_time'] ?? '06:00';
-    $footerText = $settings['telegram_footer_text'] ?? 'Join our Telegram channel for daily impact! 📖🔥';
     $tz         = $settings['admin_timezone'] ?? 'Africa/Lagos';
 
     if (empty($botToken) || empty($channelId)) {
@@ -631,7 +624,7 @@ function tgRunCronTick(): array
         $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
         // Body starts at the Scripture section; the date + title header is only
         // re-added if the photo (which carried them in its caption) failed.
-        $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
+        $bodyText = buildDevotionalBody($dev, !$photoResult['success']);
         $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
 
         $finalSuccess = $textResult['success'] || $photoResult['success'];
@@ -697,7 +690,7 @@ function tgRunCronTick(): array
                     $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
                     // Body starts at the Scripture section; the date + title
                     // header is only re-added if the photo failed to post.
-                    $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
+                    $bodyText = buildDevotionalBody($dev, !$photoResult['success']);
                     $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
 
                     $finalSuccess = $textResult['success'] || $photoResult['success'];

@@ -47,7 +47,6 @@ switch ($method) {
             'cron_secret_key'       => '',
             'cron_last_run'         => '',
             'cron_last_result'      => '',
-            'telegram_footer_text'  => 'Join our Telegram channel for daily impact! 📖🔥',
             'notify_email'          => '',
             'donation_notify_emails'=> '',
             'notify_event_login'    => 'true',

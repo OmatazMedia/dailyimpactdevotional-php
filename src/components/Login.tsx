@@ -90,6 +90,20 @@ export default function Login({ isDarkMode, onLoginSuccess }: LoginProps) {
   const [twofaSuccessMsg, setTwofaSuccessMsg] = useState("");
   const [backupCodeInput, setBackupCodeInput] = useState("");
 
+  // Deep-link from the login-notification email's "Reset my password" button
+  // (/admin/login?mode=forgot&email=...): open the forgot-password form with
+  // the account email pre-filled. The params stay in the URL (App.tsx uses
+  // them to keep this page reachable even when a session is active), and the
+  // prefill is idempotent, so a refresh simply re-fills the form. Never
+  // touches a real ?reset=TOKEN link from the reset email.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mode") !== "forgot") return;
+    setIsForgotMode(true);
+    const email = params.get("email") || "";
+    if (email) setRecoveryEmail(email);
+  }, []);
+
   useEffect(() => {
     if (!secureAllToken) return;
     (async () => {

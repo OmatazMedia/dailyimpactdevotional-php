@@ -23,9 +23,33 @@
  *
  * Should be run via cron job every minute:
  *   php /home/USERNAME/public_html/backend/api/send-mail.php
+ * or over HTTP (secret key required, same key as telegram-cron.php):
+ *   curl -s "https://yourdomain.com/backend/api/send-mail.php?key=YOUR_SECRET_KEY" > /dev/null 2>&1
  */
 
 require_once __DIR__ . '/../config/db.php';
+sendCorsHeaders();
+
+// HTTP callers must use GET; CLI (cPanel `php backend/api/send-mail.php`) has no
+// REQUEST_METHOD, so never 405 the recommended CLI cron setup.
+if (php_sapi_name() !== 'cli' && $_SERVER['REQUEST_METHOD'] !== 'GET') {
+    jsonError('Method not allowed', 405);
+}
+
+// Security: require the same cron secret key as telegram-cron.php unless the
+// worker runs from the CLI — so it can be triggered over HTTPS via curl without
+// becoming an open, unauthenticated endpoint.
+$settings = getSettings();
+$cronKey = $settings['cron_secret_key'] ?? '';
+$providedKey = $_GET['key'] ?? '';
+if (php_sapi_name() !== 'cli') {
+    if (empty($cronKey)) {
+        jsonError('Cron is not configured. Set cron_secret_key in Settings first.', 403);
+    }
+    if ($providedKey !== $cronKey) {
+        jsonError('Invalid secret key', 403);
+    }
+}
 
 $stmt = $pdo->prepare(
     "SELECT * FROM mail_queue
@@ -60,8 +84,13 @@ foreach ($emails as $email) {
     }
 }
 
-echo json_encode([
-    'processed' => $processed,
-    'failed'    => $failed,
-    'method'    => getSetting('mail_method', 'resend'),
+jsonResponse([
+    'success' => true,
+    'sent'    => $processed,
+    'failed'  => $failed,
+    'total'   => count($emails),
+    'method'  => getSetting('mail_method', 'resend'),
+    'message' => count($emails) === 0
+        ? 'No pending emails'
+        : "Processed {$processed} email(s)" . ($failed > 0 ? ", {$failed} failed" : ''),
 ]);

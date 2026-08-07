@@ -44,10 +44,12 @@ import {
   ShieldOff,
   AlertCircle,
   Smartphone,
-  Play
+  Play,
+  HelpCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import OtpCodeInput from "./OtpCodeInput";
+import HelpCenter from "./HelpCenter";
 import { Devotional } from "../types";
 import AddDevotional from "./AddDevotional";
 import ListDevotional from "./ListDevotional";
@@ -219,6 +221,8 @@ export default function Dashboard({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dashThemeOpen, setDashThemeOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // Help Center overlay (role-filtered guide) — opened from the sidebar "?" button.
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   useEffect(() => {
     if (!dashThemeOpen) return;
@@ -315,10 +319,16 @@ export default function Dashboard({
   // the feed reflects what's happening on the live site — no hardcoded demo
   // entries. Polling pauses while the admin is on another tab.
   const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
+  // Date-range filter for the feed (YYYY-MM-DD, admin timezone).
+  const [activityFrom, setActivityFrom] = useState("");
+  const [activityTo, setActivityTo] = useState("");
   useEffect(() => {
     let cancelled = false;
     const loadLogs = () => {
-      fetch(`${API_BASE}/activity-log.php?limit=50`)
+      const params = new URLSearchParams({ limit: "50" });
+      if (activityFrom) params.set("from", activityFrom);
+      if (activityTo) params.set("to", activityTo);
+      fetch(`${API_BASE}/activity-log.php?${params.toString()}`)
         .then(r => (r.ok ? r.json() : null))
         .then((data: { success?: boolean; logs?: ActivityLogEntry[] } | null) => {
           if (!cancelled && data?.success && Array.isArray(data.logs)) {
@@ -335,7 +345,7 @@ export default function Dashboard({
     loadLogs();
     const timer = setInterval(loadLogs, 8000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [activeTab]);
+  }, [activeTab, activityFrom, activityTo]);
 
   // ── Two-Factor Authentication (real, server-verified) ──────────────────────
   const loadTwofaStatus = (silent = false) => {
@@ -589,7 +599,6 @@ export default function Dashboard({
   const [telegramChannelId, setTelegramChannelId] = useState("");
   const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [telegramPostTime, setTelegramPostTime] = useState("06:00");
-  const [telegramFooterText, setTelegramFooterText] = useState("Join our Telegram channel for daily impact words!");
   const [telegramScheduleMode, setTelegramScheduleMode] = useState("scheduled");
   const [telegramShowToken, setTelegramShowToken] = useState(false);
   // Cron Secret Key — protects the HTTP cron URL (CLI cron ignores it).
@@ -764,7 +773,6 @@ export default function Dashboard({
     setCronLastResult(pick("cron_last_result"));
     setTelegramEnabled(pick("telegram_enabled", "false") === "true");
     setTelegramPostTime(pick("telegram_post_time", "06:00"));
-    setTelegramFooterText(pick("telegram_footer_text", "Join our Telegram channel for daily impact words!"));
     setTelegramScheduleMode(pick("telegram_schedule_mode", "scheduled"));
   }, [dashboardSettings]);
 
@@ -1023,7 +1031,7 @@ export default function Dashboard({
       cron_secret_key: telegramCronKey,
       telegram_enabled: telegramEnabled ? "true" : "false",
       telegram_post_time: telegramPostTime,
-      telegram_footer_text: telegramFooterText,
+      
       telegram_schedule_mode: telegramScheduleMode,
     };
     // Persist to API only — no localStorage fallback
@@ -1061,14 +1069,14 @@ export default function Dashboard({
       await apiPut(`${API_BASE}/settings.php`, {
         telegram_bot_token: telegramBotToken,
         telegram_channel_id: telegramChannelId,
-        telegram_footer_text: telegramFooterText,
+        
       });
       // Mirror to localStorage so the fields survive reload / re-login even if
       // the server session can't confirm the credentials on a later GET.
       writeTgCache({
         telegram_bot_token: telegramBotToken,
         telegram_channel_id: telegramChannelId,
-        telegram_footer_text: telegramFooterText,
+        
       });
 
       setTelegramConsoleLogs(prev => [...prev,
@@ -1640,6 +1648,16 @@ export default function Dashboard({
   // Admin Timezone State
   const [adminTimezone, setAdminTimezone] = useState<string>("Africa/Lagos");
   const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles">("profile");
+
+  // Help Center "Go to page" action — jumps to a dashboard tab (and settings
+  // sub-tab when the guide targets one), then closes the overlay.
+  const handleHelpNavigate = (tab: string, subTab?: string) => {
+    setActiveTab(tab as "overview" | "add-devotional" | "manage-devotionals" | "header-images" | "user-management" | "settings" | "import-devotional" | "telegram-integration" | "foreword" | "payments" | "analytics");
+    if (subTab) {
+      setSettingsSubTab(subTab as "profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles");
+    }
+    setIsHelpOpen(false);
+  };
   
   // Email Configuration State
   const [emailConfig, setEmailConfig] = useState({
@@ -2560,6 +2578,21 @@ export default function Dashboard({
             </button>
             )}
 
+            {/* Help Center — visible to every role; the guides themselves are
+                filtered by the same permissions as the sidebar. */}
+            <button
+              onClick={() => setIsHelpOpen(true)}
+              title="Help Center"
+              className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center ${sidebarCollapsed ? "justify-center" : "gap-2.5"} transition-all ${
+                isHelpOpen
+                  ? "bg-teal-brand text-white shadow-md shadow-teal-brand/10"
+                  : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white"
+              }`}
+            >
+              <HelpCircle className="w-4 h-4 shrink-0" />
+              {!sidebarCollapsed && <span>Help Center</span>}
+            </button>
+
           </div>
 
           {/* STICKY BOTTOM USER PROFILE & LOGOUT */}
@@ -2983,15 +3016,50 @@ export default function Dashboard({
                   <div className={`border rounded-2xl overflow-hidden ${
                     isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
                   }`}>
-                    <div className={`px-5 py-3.5 border-b font-serif text-xs font-black uppercase tracking-wider ${
-                      isDarkMode ? "bg-slate-950 border-slate-800 text-slate-400" : "bg-slate-50 border-slate-100 text-slate-500"
+                    <div className={`px-5 py-3.5 border-b ${
+                      isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-100"
                     }`}>
-                      Administrative Log Feed
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <span className="font-serif text-xs font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          Administrative Log Feed
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="date"
+                            value={activityFrom}
+                            max={activityTo || undefined}
+                            onChange={(e) => setActivityFrom(e.target.value)}
+                            className={`text-[11px] font-bold rounded-lg px-2 py-1.5 border focus:outline-none ${
+                              isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-white border-slate-200 text-slate-900"
+                            }`}
+                          />
+                          <span className="text-[10px] text-slate-400 font-black">→</span>
+                          <input
+                            type="date"
+                            value={activityTo}
+                            min={activityFrom || undefined}
+                            onChange={(e) => setActivityTo(e.target.value)}
+                            className={`text-[11px] font-bold rounded-lg px-2 py-1.5 border focus:outline-none ${
+                              isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-white border-slate-200 text-slate-900"
+                            }`}
+                          />
+                          {(activityFrom || activityTo) && (
+                            <button
+                              onClick={() => { setActivityFrom(""); setActivityTo(""); }}
+                              className="text-[10px] font-black uppercase tracking-wider text-teal-brand hover:opacity-80 px-1.5 py-1"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                     <div className="p-4 divide-y divide-slate-100 dark:divide-slate-800 font-semibold text-xs leading-relaxed max-h-72 overflow-y-auto">
                       {activityLogs.length === 0 && (
                         <div className="py-6 text-center text-[11px] text-slate-400 italic font-semibold">
-                          No admin activity recorded yet. Actions like logins, devotional saves and header uploads will appear here in real time.
+                          {(activityFrom || activityTo)
+                            ? "No activity found for the selected date range."
+                            : "No admin activity recorded yet. Actions like logins, devotional saves and header uploads will appear here in real time."}
                         </div>
                       )}
                       {activityLogs.map((log) => (
@@ -5701,25 +5769,6 @@ export default function Dashboard({
                           )}
                         </div>
 
-                        {/* Automated Signature Footer Text */}
-                        <div className="space-y-1">
-                          <label className="block text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
-                            Telegram Message Footer Signature
-                          </label>
-                          <textarea
-                            rows={3}
-                            value={telegramFooterText}
-                            onChange={(e) => setTelegramFooterText(e.target.value)}
-                            className={`w-full py-2 px-3 border rounded-xl focus:outline-none font-sans leading-relaxed ${
-                              isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
-                            }`}
-                            placeholder="Add links, invitations or QR information..."
-                          />
-                          <p className="text-[9px] text-slate-400 font-medium leading-relaxed">
-                            This text is automatically appended below the devotional paragraphs when sent to your channel. Supports markdown-style links.
-                          </p>
-                        </div>
-
                         {/* Save Button */}
                         <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-end">
                           <button
@@ -6338,6 +6387,15 @@ export default function Dashboard({
         </div>
       )}
 
+      {/* Help Center overlay */}
+      {isHelpOpen && (
+        <HelpCenter
+          isDarkMode={isDarkMode}
+          canSee={canSee}
+          onNavigate={handleHelpNavigate}
+          onClose={() => setIsHelpOpen(false)}
+        />
+      )}
     </div>
   );
 }

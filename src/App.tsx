@@ -167,20 +167,27 @@ export default function App() {
 
   // Active Administrator Session State — check PHP session on mount
   const [currentUser, setCurrentUser] = useState<string | null>(null);
+  // False until the session check above has finished (success or failure). The
+  // redirect guard below waits on this so a reload on /dashboard doesn't see
+  // currentUser=null mid-check and kick the still-logged-in admin home.
+  const [sessionChecked, setSessionChecked] = useState(false);
 
   useEffect(() => {
     // Record a public website visit (skipped inside the admin dashboard area).
     initAnalytics(
       location.pathname.startsWith("/dashboard") || location.pathname.startsWith("/admin")
     );
-    fetch(`${API_BASE}/admin.php?action=check`)
+    // Bound the wait: if the check hangs, sessionChecked must still flip so
+    // the redirect guard below can never be stuck forever.
+    fetch(`${API_BASE}/admin.php?action=check`, { signal: AbortSignal.timeout(10000) })
       .then(r => r.json())
       .then(data => {
         if (data.loggedIn && data.user) {
           setCurrentUser(data.user.email);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .then(() => setSessionChecked(true));
   }, []);
 
   // Sync activeTab with URL pathname
@@ -208,9 +215,20 @@ export default function App() {
 
   // Redirection checks for authenticated vs unauthenticated paths
   useEffect(() => {
+    // Wait for the PHP session check to complete before deciding where to
+    // redirect, so a hard reload on /dashboard keeps a logged-in admin put.
+    if (!sessionChecked) return;
+
     const path = location.pathname;
     const knownRoutes = ["/", "/all-devotional", "/foreword", "/author", "/dashboard", "/admin/login"];
     const isKnown = knownRoutes.some(r => path === r || path.startsWith(r + "/"));
+
+    // Security deep-links from emailed buttons (?reset=TOKEN, ?secureall=TOKEN,
+    // ?mode=forgot) must stay reachable even when a session is active —
+    // otherwise a logged-in admin clicking one would be bounced to the
+    // dashboard before the token or pre-filled reset form could act.
+    const search = new URLSearchParams(location.search);
+    const isSecurityDeepLink = !!(search.get("reset") || search.get("secureall") || search.get("mode") === "forgot");
 
     if (path === "/home" || path === "/login") {
       navigate("/", { replace: true });
@@ -219,13 +237,13 @@ export default function App() {
       navigate("/", { replace: true });
     } else if (path.startsWith("/dashboard") && !currentUser) {
       navigate("/", { replace: true });
-    } else if (path === "/admin/login" && currentUser) {
+    } else if (path === "/admin/login" && currentUser && !isSecurityDeepLink) {
       navigate("/dashboard", { replace: true });
     } else if (!isKnown) {
       // Unknown route — redirect to homepage
       navigate("/", { replace: true });
     }
-  }, [location.pathname, currentUser, navigate]);
+  }, [location.pathname, location.search, currentUser, sessionChecked, navigate]);
 
   const [devotionals, setDevotionals] = useState<Devotional[]>([]);
   const [selectedDevotional, setSelectedDevotional] = useState<Devotional | null>(null);

@@ -1682,10 +1682,9 @@ function buildPhotoCaption(dev: DevotionalRecord): string {
 // starts at the Scripture section — used when the devotional photo (whose
 // caption already carries the date + title) was posted first, so the date and
 // title are never duplicated across the two messages.
-function buildDevotionalBody(dev: DevotionalRecord, footerText: string, includeHeader = true): string {
+function buildDevotionalBody(dev: DevotionalRecord, includeHeader = true): string {
   const MAX = 4096;
-  const reserve = footerText.length + 40; // footer + separator + slack
-  const budget = MAX - reserve;
+  const budget = MAX;
   const sections: string[] = [];
 
   // Date + Title (header block — same as homepage). Skipped when the header
@@ -1729,7 +1728,6 @@ function buildDevotionalBody(dev: DevotionalRecord, footerText: string, includeH
     }
   }
 
-  if (footerText) body += `\n\n—\n${footerText}`;
   return body.slice(0, MAX);
 }
 
@@ -1767,13 +1765,12 @@ function resolveImageUrl(dev: DevotionalRecord): string {
 // Core Telegram send function.
 // Two-step posting so the body is never truncated by the 1024-char photo caption limit:
 //   1. sendPhoto  -> image + short caption (title + date)
-//   2. sendMessage -> full devotional body (scripture, paragraphs, footer) — up to 4096 chars
+//   2. sendMessage -> full devotional body (scripture through bible reading) — up to 4096 chars
 // If the photo fails, the body is still sent as a standalone text message.
 async function sendToTelegram(
   botToken: string,
   channelId: string,
-  dev: DevotionalRecord,
-  footerText: string
+  dev: DevotionalRecord
 ): Promise<{ success: boolean; messageId?: number; error?: string }> {
   const photoCaption = buildPhotoCaption(dev);
   const imageUrl = resolveImageUrl(dev);
@@ -1812,7 +1809,7 @@ async function sendToTelegram(
 
   // --- STEP 2: full devotional body (starts at the Scripture section; the
   // date + title header is only re-added if the photo failed to post) ------
-  const bodyText = buildDevotionalBody(dev, footerText, photoPosted);
+  const bodyText = buildDevotionalBody(dev, !photoPosted);
   try {
     const textRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
@@ -1968,7 +1965,6 @@ app.post("/api/telegram/send-now", async (req: Request, res: Response) => {
   const settings = readJson<Record<string, string>>(SETTINGS_FILE, {});
   const botToken = settings.telegram_bot_token ?? "";
   const channelId = settings.telegram_channel_id ?? "";
-  const footerText = settings.telegram_footer_text ?? "Join our Telegram channel for daily impact! 📖🔥";
 
   if (!botToken || !channelId) {
     res.status(400).json({ success: false, error: "Bot token and channel ID must be configured in Settings → Telegram." });
@@ -1999,7 +1995,7 @@ app.post("/api/telegram/send-now", async (req: Request, res: Response) => {
   }
 
   console.log(`[Telegram] Manual send triggered for: "${dev.title}"`);
-  const result = await sendToTelegram(botToken, channelId, dev, footerText);
+  const result = await sendToTelegram(botToken, channelId, dev);
 
   // Log the result
   const log = readJson<TelegramLogEntry[]>(TELEGRAM_LOG_FILE, []);
@@ -2073,7 +2069,6 @@ async function runTelegramScheduler() {
 
   const botToken = settings.telegram_bot_token ?? "";
   const channelId = settings.telegram_channel_id ?? "";
-  const footerText = settings.telegram_footer_text ?? "Join our Telegram channel for daily impact! 📖🔥";
   const tz = settings.admin_timezone ?? "Africa/Lagos";
 
   if (!botToken || !channelId) return;
@@ -2125,7 +2120,7 @@ async function runTelegramScheduler() {
     }
 
     console.log(`[Telegram Scheduler] ⏰ Delivering scheduled "${dev.title}" (${row.scheduledDate}, ${row.postTime})...`);
-    const result = await sendToTelegram(botToken, channelId, dev, footerText);
+    const result = await sendToTelegram(botToken, channelId, dev);
     row.status = result.success ? "sent" : "failed";
     row.sentAt = new Date().toISOString();
     row.telegramMessageId = result.messageId;
@@ -2169,7 +2164,7 @@ async function runTelegramScheduler() {
   }
 
   console.log(`[Telegram Scheduler] ⏰ Posting "${dev.title}" to ${channelId}...`);
-  const result = await sendToTelegram(botToken, channelId, dev, footerText);
+  const result = await sendToTelegram(botToken, channelId, dev);
 
   log.push({
     id: generateId(),

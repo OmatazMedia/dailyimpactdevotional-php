@@ -131,7 +131,10 @@ function notifyAdminLogin(string $email, string $ip, string $ua): void
         'login_location' => $ctx['location'],
         'login_browser'  => $ctx['browser'],
         'secureall_url'  => $origin . 'admin/login?secureall=' . $secureToken,
-        'reset_url'      => $origin . 'admin/login',
+        // Deep-link into the forgot-password form with the account email
+        // pre-filled (Login.tsx reads mode=forgot & email=), so the owner can
+        // request a fresh reset link in one step instead of re-typing it.
+        'reset_url'      => $origin . 'admin/login?mode=forgot&email=' . rawurlencode($email),
     ]);
 
     foreach ($notifyEmails as $notifyEmail) {
