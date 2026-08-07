@@ -203,7 +203,9 @@ function renderEmailTemplate(string $key, array $tokens = []): array
 function emailBrandHtml(string $title, string $bodyHtml): string
 {
     $site = (string)getSetting('site_name', 'Daily Impact Devotional');
+    $siteEsc = htmlspecialchars($site, ENT_QUOTES, 'UTF-8');
     $logo = siteLogoUrl();
+    $logoEsc = htmlspecialchars($logo, ENT_QUOTES, 'UTF-8');
     $social = emailSocialLinks();
     $year = date('Y');
 
@@ -239,11 +241,12 @@ function emailBrandHtml(string $title, string $bodyHtml): string
     <tr>
       <td align="center">
         <table role="presentation" class="wrap" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
-          <!-- Header: logo + site name -->
+          <!-- Header: logo + site name. Light grey background so the black
+               logo is clearly visible (a dark header would swallow it). -->
           <tr>
-            <td class="hdr" style="background:#0f172a;padding:22px 28px;text-align:center;">
-              <img src="{$logo}" alt="{$site}" style="max-height:54px;width:auto;display:inline-block;vertical-align:middle;" />
-              <p style="margin:6px 0 0;color:#e2e8f0;font-size:12px;letter-spacing:.22em;text-transform:uppercase;font-weight:800;">{$site}</p>
+            <td class="hdr" style="background:#f1f5f9;padding:26px 28px;text-align:center;border-bottom:1px solid #e2e8f0;">
+              <img src="{$logoEsc}" alt="{$siteEsc}" style="max-height:56px;width:auto;display:inline-block;vertical-align:middle;" />
+              <p style="margin:8px 0 0;color:#475569;font-size:11px;letter-spacing:.22em;text-transform:uppercase;font-weight:800;">{$site}</p>
             </td>
           </tr>
           <!-- Body -->
@@ -390,7 +393,18 @@ function mailSendViaSmtp(array $row): array
 function mailTransportSend(array $row): array
 {
     $primary = (string)getSetting('mail_method', 'resend');
-    $order = $primary === 'smtp' ? ['smtp', 'resend'] : ['resend', 'smtp'];
+    if ($primary !== 'smtp') $primary = 'resend';
+
+    // The SECONDARY is stored explicitly (mail_method_secondary); fall back to
+    // the non-primary transport when unset or when it duplicates the primary.
+    $secondary = (string)getSetting('mail_method_secondary', '');
+    if ($secondary !== 'smtp' && $secondary !== 'resend') {
+        $secondary = $primary === 'smtp' ? 'resend' : 'smtp';
+    }
+    if ($secondary === $primary) {
+        $secondary = $primary === 'smtp' ? 'resend' : 'smtp';
+    }
+    $order = [$primary, $secondary];
 
     foreach ($order as $method) {
         $result = $method === 'smtp'

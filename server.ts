@@ -323,6 +323,7 @@ app.get("/api/settings", (_req: Request, res: Response) => {
   const data = readJson<object>(SETTINGS_FILE, {
     admin_timezone: "Africa/Lagos",
     telegram_channel_link: "https://t.me/dailyimpactdevotional",
+    cron_secret_key: "",
   });
   res.json(data);
 });
@@ -1372,13 +1373,14 @@ app.get("/api/email-config", (req: Request, res: Response) => {
         body: sTpl[`email_template_${key}_body`] ?? `<p>Edit the <b>${key}</b> template body here. Tokens like {{donor_name}} are replaced when the email is sent.</p>`,
         blocks: sTpl[`email_template_${key}_blocks`] ?? "",
       })),
-      branding: { siteName: "Daily Impact Devotional", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" },
+      branding: { siteName: "Daily Impact Devotional", siteUrl: sTpl.site_url ?? "", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" },
     });
     return;
   }
   const s = readJson<Record<string, string>>(SETTINGS_FILE, {});
   res.json({
     mailMethod: s.mail_method ?? "resend",
+    mailMethodSecondary: s.mail_method_secondary ?? (s.mail_method === "smtp" ? "resend" : "smtp"),
     resend: { apiKey: s.resend_api_key ? s.resend_api_key.slice(0, 8) + "..." : "", fromEmail: s.resend_from_email ?? "", fromName: s.resend_from_name ?? "Daily Impact Devotional", replyTo: s.resend_reply_to ?? "", enabled: (s.resend_enabled ?? "true") === "true" },
     smtp: { host: s.smtp_host ?? "", user: s.smtp_user ?? "", pass: s.smtp_pass ? "********" : "", port: s.smtp_port ?? "587", secure: s.smtp_secure ?? "tls", enabled: (s.smtp_enabled ?? "false") === "true" },
     donation: { fromName: s.donation_from_name ?? "", fromEmail: s.donation_from_email ?? "" },
@@ -1406,6 +1408,7 @@ app.put("/api/email-config", (req: Request, res: Response) => {
     }
     const b = (body.branding as Record<string, string>) ?? {};
     if (b.siteName) s.site_name = b.siteName;
+    if (b.siteUrl) s.site_url = String(b.siteUrl).replace(/\/+$/, "");
     if (b.siteLogoUrl) s.site_logo_url = b.siteLogoUrl;
     for (const [k, v] of Object.entries({ socialFacebook: "social_facebook", socialTwitter: "social_twitter", socialInstagram: "social_instagram", socialYoutube: "social_youtube" })) {
       if ((b as Record<string, string>)[k] !== undefined) s[v] = (b as Record<string, string>)[k];
@@ -1416,6 +1419,13 @@ app.put("/api/email-config", (req: Request, res: Response) => {
   }
   const mailMethod = body.mailMethod;
   if (typeof mailMethod === "string" && mailMethod) s.mail_method = mailMethod;
+  const mailMethodSecondary = body.mailMethodSecondary;
+  if (typeof mailMethodSecondary === "string" && mailMethodSecondary) {
+    const primary = s.mail_method ?? "resend";
+    let secondary = mailMethodSecondary === "smtp" ? "smtp" : "resend";
+    if (secondary === primary) secondary = primary === "smtp" ? "resend" : "smtp";
+    s.mail_method_secondary = secondary;
+  }
   const resend = body.resend as Record<string, unknown> | undefined;
   if (resend) {
     if (typeof resend.apiKey === "string" && !resend.apiKey.includes("...")) s.resend_api_key = resend.apiKey;
@@ -1454,7 +1464,61 @@ app.post("/api/email-config", (req: Request, res: Response) => {
   const { email } = req.body as { email?: string };
   if (!email) { res.status(400).json({ success: false, error: "Valid email address is required" }); return; }
   console.log(`[Email] Test email queued → ${email} (mock: no real send in dev)`);
+  // Mirror the test send into the mail queue so the delivery panel shows it.
+  mockMailQueue.push({
+    id: `mock-${Date.now()}`,
+    to: email,
+    subject: "📧 Test Email — Daily Impact Devotional",
+    hasHtml: true,
+    body: "Test email (mock — no real send in dev)",
+    sent: true,
+    sentAt: new Date().toISOString(),
+    method: "mock",
+    attempts: 1,
+    lastAttemptAt: new Date().toISOString(),
+    error: null,
+    createdAt: new Date().toISOString(),
+  });
   res.json({ success: true, message: "Test email sent via MOCK (dev). Configure Resend/SMTP keys in Settings → Email to send for real.", method: "mock" });
+});
+
+// ─── MAIL QUEUE (mock mirror of backend/api/mail-queue.php) ─────────────────────
+interface MockMailRow {
+  id: string;
+  to: string;
+  subject: string;
+  hasHtml: boolean;
+  body: string;
+  sent: boolean;
+  sentAt: string | null;
+  method: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  error: string | null;
+  createdAt: string;
+}
+const mockMailQueue: MockMailRow[] = [];
+
+app.get("/api/mail-queue", (_req: Request, res: Response) => {
+  res.json([...mockMailQueue].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100));
+});
+
+app.post("/api/mail-queue", (req: Request, res: Response) => {
+  if (req.query.action !== "send") {
+    res.status(400).json({ success: false, error: "Invalid action. Use: send" });
+    return;
+  }
+  const now = new Date().toISOString();
+  const pending = mockMailQueue.filter(m => !m.sent);
+  for (const m of pending) {
+    m.sent = true;
+    m.sentAt = now;
+    m.method = "mock";
+    m.attempts += 1;
+    m.lastAttemptAt = now;
+    m.error = null;
+  }
+  res.json({ success: true, sent: pending.length, failed: 0, total: pending.length, message: pending.length ? `Sent ${pending.length} email(s) via MOCK` : "No pending emails" });
 });
 
 // ─── EMAIL NOTIFICATION HELPER ───────────────────────────────────────────────────

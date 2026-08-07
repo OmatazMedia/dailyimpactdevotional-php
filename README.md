@@ -112,7 +112,7 @@ public_html/
 ### 3. Run the installer
 
 1. Upload the archive/contents to `public_html`
-2. Visit **`https://yourdomain.com/install.php`**
+2. Visit **`https://yourdomain.com/backend/install.php`**
 3. Enter MySQL details + your admin email/password
 4. **Delete `install.php` afterwards!**
 

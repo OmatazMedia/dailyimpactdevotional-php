@@ -159,7 +159,7 @@ switch ($method) {
             // as the homepage header), and the body mirrors the homepage:
             // Scripture → paragraphs → Additional Scripture → Prayer &
             // Confession → One Year Bible Reading → footer.
-            $photoCaption = "<i>📖 " . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n<b>" . tgEscape($dev['title']) . "</b>";
+            $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
 
             // Step 1: Send photo (caption carries the date + title)
             $result = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
@@ -425,13 +425,13 @@ function resolveImageUrl(array $dev): string {
  *
  *   [paragraphs...]
  *
- *   <b>Additional Scripture Reference:</b>
+ *   <b>ADDITIONAL SCRIPTURE REFERENCE(S):</b>
  *   value
  *
- *   <b>Prayer & Confession of Faith:</b>
+ *   <b>PRAYER AND CONFESSION OF FAITH:</b>
  *   value
  *
- *   <b>One Year Bible Reading:</b>
+ *   <b>DAILY BIBLE READING:</b>
  *   value
  *
  *   —
@@ -455,6 +455,12 @@ function tgEscape(string $text): string {
     return htmlspecialchars($plain, ENT_QUOTES, 'UTF-8');
 }
 
+// Force an all-caps title (e.g. "APPOINTED TO BEAR FRUIT THAT REMAINS"). Uses
+// UTF-8-aware uppercasing when mbstring is loaded, plain strtoupper otherwise.
+function tgUpper(string $text): string {
+    return function_exists('mb_strtoupper') ? mb_strtoupper($text, 'UTF-8') : strtoupper($text);
+}
+
 function buildDevotionalBody(array $dev, string $footerText, bool $includeHeader = true): string {
     $maxLen = 4096;
     $reserve = mb_strlen($footerText) + 40; // footer + separator + slack
@@ -468,13 +474,13 @@ function buildDevotionalBody(array $dev, string $footerText, bool $includeHeader
         $dateStr = trim((string)($dev['date'] ?? '')) . ', ' . (int)($dev['year'] ?? 0);
         $title = trim((string)($dev['title'] ?? ''));
         if ($dateStr !== ', 0') $sections[] = '<b>' . tgEscape($dateStr) . '</b>';
-        if ($title !== '') $sections[] = '<b>' . tgEscape($title) . '</b>';
+        if ($title !== '') $sections[] = '<b>' . tgEscape(tgUpper($title)) . '</b>';
     }
 
     // Scripture
     $ref = trim((string)($dev['scripture_ref'] ?? ''));
     $scripture = trim((string)($dev['scripture_text'] ?? ''));
-    if ($ref !== '') $sections[] = '<b>Scripture:</b> <i>' . tgEscape($ref) . '</i>';
+    if ($ref !== '') $sections[] = '<b>SCRIPTURE:</b> <i>' . tgEscape($ref) . '</i>';
     if ($scripture !== '') $sections[] = '"' . tgEscape($scripture) . '"';
 
     // Body paragraphs
@@ -486,15 +492,15 @@ function buildDevotionalBody(array $dev, string $footerText, bool $includeHeader
 
     // Additional Scripture Reference (bold label)
     $additional = trim((string)($dev['additional_scripture'] ?? ''));
-    if ($additional !== '') $sections[] = "<b>Additional Scripture Reference:</b>\n" . tgEscape($additional);
+    if ($additional !== '') $sections[] = "<b>ADDITIONAL SCRIPTURE REFERENCE(S):</b>\n" . tgEscape($additional);
 
     // Prayer & Confession of Faith (bold label)
     $prayer = trim((string)($dev['prayer_confession'] ?? ''));
-    if ($prayer !== '') $sections[] = "<b>Prayer & Confession of Faith:</b>\n" . tgEscape($prayer);
+    if ($prayer !== '') $sections[] = "<b>PRAYER AND CONFESSION OF FAITH:</b>\n" . tgEscape($prayer);
 
     // One Year Bible Reading (bold label)
     $bible = trim((string)($dev['bible_reading'] ?? ''));
-    if ($bible !== '') $sections[] = "<b>One Year Bible Reading:</b>\n" . tgEscape($bible);
+    if ($bible !== '') $sections[] = "<b>DAILY BIBLE READING:</b>\n" . tgEscape($bible);
 
     // Assemble with \n\n separators, truncating only when out of budget.
     $body = '';

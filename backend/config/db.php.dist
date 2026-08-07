@@ -434,6 +434,7 @@ function secretSettingKeys(): array {
     return [
         'telegram_bot_token',
         'telegram_channel_id',
+        'cron_secret_key',
         'resend_api_key',
         'smtp_pass',
         'paystack_secret_key',
@@ -846,7 +847,12 @@ function queueMail(string $to, string $subject, string $body): void {
 // dashboard (email_template_<key>_subject / _body settings) and every email is
 // wrapped in a branded, responsive HTML shell (logo header + social footer).
 
-/** Idempotently add the html column to mail_queue (fresh + existing installs). */
+/**
+ * Idempotently add delivery-tracking columns to mail_queue (fresh + existing
+ * installs). Includes the original html/from_* columns plus the delivery
+ * status columns (method / attempts / last_attempt_at) so older databases
+ * get upgraded in place on the next queue write.
+ */
 function ensureMailQueueHtmlColumn(): void {
     global $pdo;
     if (!$pdo instanceof PDO) {
@@ -867,6 +873,15 @@ function ensureMailQueueHtmlColumn(): void {
         }
         if (!in_array('from_name', $cols, true)) {
             $pdo->exec("ALTER TABLE mail_queue ADD COLUMN from_name VARCHAR(120) DEFAULT NULL AFTER from_email");
+        }
+        if (!in_array('method', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN method VARCHAR(20) DEFAULT NULL AFTER sent_at");
+        }
+        if (!in_array('attempts', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN attempts INT NOT NULL DEFAULT 0 AFTER method");
+        }
+        if (!in_array('last_attempt_at', $cols, true)) {
+            $pdo->exec("ALTER TABLE mail_queue ADD COLUMN last_attempt_at TIMESTAMP NULL DEFAULT NULL AFTER attempts");
         }
     } catch (Throwable $e) {
         // Table may not exist yet on a fresh install — install.php creates it.
@@ -894,11 +909,83 @@ function queueMailHtml(string $to, string $subject, string $body, string $html =
     }
 }
 
-/** Build an absolute URL from the current request host (emails need absolute links). */
+/**
+ * Record a mailTransportSend() outcome on a queue row: the transport that
+ * delivered it (or the last one tried on failure), the attempt count, the last
+ * attempt time and the latest error. Used by the cron worker and the manual
+ * "send now" endpoint so the delivery status panel can show exactly which
+ * transport (Resend/SMTP) each email went out on.
+ */
+function updateMailQueueResult(string $id, array $result): void {
+    global $pdo;
+    if (!$pdo instanceof PDO) {
+        return;
+    }
+    try {
+        $method = isset($result['method']) ? (string)$result['method'] : '';
+        if (!in_array($method, ['resend', 'smtp'], true)) {
+            $method = '';
+        }
+        if (!empty($result['success'])) {
+            $stmt = $pdo->prepare(
+                "UPDATE mail_queue
+                 SET sent = 1, sent_at = NOW(), method = ?, error = NULL,
+                     attempts = attempts + 1, last_attempt_at = NOW()
+                 WHERE id = ?"
+            );
+            $stmt->execute([$method, $id]);
+        } else {
+            $stmt = $pdo->prepare(
+                "UPDATE mail_queue
+                 SET sent = 0, method = ?, error = ?,
+                     attempts = attempts + 1, last_attempt_at = NOW()
+                 WHERE id = ?"
+            );
+            $stmt->execute([$method, mb_substr((string)($result['error'] ?? ''), 0, 500), $id]);
+        }
+    } catch (Throwable $e) {
+        // Never break the mail worker over a best-effort status update.
+    }
+}
+
+/**
+ * Normalize a user-entered site URL: ensure a scheme, lowercase it, and strip
+ * trailing slashes. A bare "domain/path" (no scheme) is treated as a typo and
+ * reduced to the host; full URLs keep any sub-path so subdirectory installs
+ * (e.g. https://site.com/devotional) still build correct absolute links.
+ */
+function normalizeSiteUrl(string $raw): string
+{
+    $raw = trim($raw);
+    if ($raw === '') return '';
+    $noScheme = !preg_match('#^https?://#i', $raw);
+    if ($noScheme) $raw = 'https://' . $raw;
+    $parts = parse_url($raw);
+    if (!$parts || empty($parts['host'])) return '';
+    $scheme = strtolower($parts['scheme'] ?? 'https');
+    $host = $parts['host'] . (!empty($parts['port']) ? ':' . (int)$parts['port'] : '');
+    $path = $noScheme ? '' : (string)($parts['path'] ?? '');
+    return $scheme . '://' . $host . rtrim($path, '/');
+}
+
+/**
+ * Build an absolute URL. Prefers the stored site_url setting (set at install
+ * time) so links stay correct even when emails are sent from cron/CLI where
+ * $_SERVER['HTTP_HOST'] is unavailable; falls back to the request host.
+ */
 function siteAbsoluteUrl(string $path = ''): string {
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    return $scheme . '://' . $host . '/' . ltrim($path, '/');
+    try {
+        $base = trim((string)getSetting('site_url', ''));
+    } catch (Throwable $e) {
+        // DB unavailable — never fail link building, fall back to the host.
+        $base = '';
+    }
+    if ($base === '') {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $base = $scheme . '://' . $host;
+    }
+    return rtrim($base, '/') . '/' . ltrim($path, '/');
 }
 
 /** Resolve the site logo URL used in the branded email header (setting overrides packaged logo). */
@@ -1169,6 +1256,7 @@ function validateSessionBinding(): bool {
  * @return bool True if session is valid
  */
 function secureSession(int $maxIdleSeconds = 3600): bool {
+    global $pdo;
     if (session_status() === PHP_SESSION_NONE) {
         configureSession();
         session_start();

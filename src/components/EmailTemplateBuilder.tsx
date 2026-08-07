@@ -133,7 +133,7 @@ interface BuilderProps {
   blocks: EmailBlock[];
   onChange: (blocks: EmailBlock[]) => void;
   tokens: string[];
-  branding: { siteName: string; siteLogoUrl: string; socialFacebook: string; socialTwitter: string; socialInstagram: string; socialYoutube: string };
+  branding: { siteName: string; siteUrl: string; siteLogoUrl: string; socialFacebook: string; socialTwitter: string; socialInstagram: string; socialYoutube: string };
 }
 
 const PALETTE: { type: BlockType; label: string; icon: React.ReactNode }[] = [
@@ -266,13 +266,20 @@ export default function EmailTemplateBuilder({ isDarkMode, blocks, onChange, tok
           <span className="normal-case font-semibold tracking-normal">{blocks.length} block{blocks.length === 1 ? "" : "s"}</span>
         </div>
 
-        {/* Branded shell */}
-        <div className="rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-sm">
-          <div className="px-5 py-4 flex items-center gap-3 border-b border-slate-100">
-            {branding.siteLogoUrl
-              ? <img src={branding.siteLogoUrl} alt="logo" className="h-8 w-auto object-contain" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
-              : <div className="h-8 w-8 rounded-lg bg-teal-brand/15 text-teal-brand flex items-center justify-center font-black text-sm">DI</div>}
-            <span className="font-serif font-black text-sm text-slate-900 truncate">{branding.siteName}</span>
+        {/* Branded shell — mirrors the real 600px email layout: light-grey
+            header (black logo pops), centered logo + site name below. */}
+        <div className="max-w-[600px] mx-auto rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-sm">
+          <div className="px-6 py-5 text-center" style={{ background: "#f1f5f9", borderBottom: "1px solid #e2e8f0" }}>
+            {(() => {
+              // Custom logo from branding; otherwise the packaged logo on the
+              // configured site URL, so the preview matches real emails.
+              const base = (branding.siteUrl || "").trim().replace(/\/+$/, "");
+              const logo = (branding.siteLogoUrl || (base ? `${base}/assets/images/dailyimpact.png` : "")).trim();
+              return logo
+                ? <img src={logo} alt="logo" className="h-10 w-auto object-contain mx-auto" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
+                : null;
+            })()}
+            <p className="mt-2 text-[10px] font-extrabold uppercase tracking-[0.22em] text-slate-500">{branding.siteName}</p>
           </div>
 
           <div

@@ -4,8 +4,10 @@
  * 
  * GET /api/telegram/cron - Run one scheduler tick
  * 
- * Set up a cPanel cron job to call this every 5-10 minutes:
- *   curl -s "https://yourdomain.com/api/telegram/cron?key=YOUR_SECRET_KEY" > /dev/null
+ * Set up a cPanel cron job to call this every 5-10 minutes (CLI is simplest):
+ *   php /home/USERNAME/public_html/backend/api/telegram-cron.php
+ * or over HTTP (key required):
+ *   curl -s "https://yourdomain.com/backend/api/telegram-cron.php?key=YOUR_SECRET_KEY" > /dev/null
  * 
  * The secret key should be set in the settings table as 'cron_secret_key'.
  * If no key is configured, the endpoint can only be called from localhost/CLI.
@@ -31,7 +33,9 @@ sendCorsHeaders();
 // buildDevotionalBody).
 require_once __DIR__ . '/telegram.php';
 
-if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+// HTTP callers must use GET; CLI (cPanel `php backend/api/telegram-cron.php`)
+// has no REQUEST_METHOD, so never 405 the recommended CLI cron setup.
+if (php_sapi_name() !== 'cli' && $_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonError('Method not allowed', 405);
 }
 
@@ -124,7 +128,7 @@ foreach ($dueRows as $row) {
     }
 
     $imageUrl = resolveImageUrl($dev);
-    $photoCaption = "<i>📖 " . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n<b>" . tgEscape($dev['title']) . "</b>";
+    $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
 
     $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
     // Body starts at the Scripture section; the date + title header is only
@@ -191,7 +195,7 @@ if ($posted === 0 && ($settings['telegram_schedule_mode'] ?? 'scheduled') === 's
 
             if ($dev) {
                 $imageUrl = resolveImageUrl($dev);
-                $photoCaption = "<i>📖 " . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n<b>" . tgEscape($dev['title']) . "</b>";
+                $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
 
                 $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
                 // Body starts at the Scripture section; the date + title header

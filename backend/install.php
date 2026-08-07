@@ -29,6 +29,30 @@ function filePermissionStr(string $path): string {
     return substr(sprintf('%o', fileperms($path)), -4);
 }
 
+/**
+ * Fetch the HTTP status of a URL (follows redirects). Returns the final code
+ * and any curl error string; used by the post-install reachability checks.
+ * @return array{code:int, error:string}
+ */
+function httpStatusCheck(string $url): array
+{
+    $ch = @curl_init($url);
+    if (!$ch) {
+        return ['code' => 0, 'error' => 'cURL unavailable'];
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 5,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_FOLLOWLOCATION => true,
+    ]);
+    @curl_exec($ch);
+    $code  = (int)@curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = (string)curl_error($ch);
+    @curl_close($ch);
+    return ['code' => $code, 'error' => $error];
+}
+
 // ─── State ─────────────────────────────────────────────────────────────────
 
 $configFile = __DIR__ . '/config/db.php';
@@ -43,6 +67,10 @@ $configDir = __DIR__ . '/config';
 $error   = '';
 $success = '';
 $installed = false;
+
+// Auto-detected public URL (scheme + host) — pre-fills the Site URL field.
+$autoDetectedUrl = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
+    . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
 
 // ─── Pre-Flight Checks ─────────────────────────────────────────────────────
 
@@ -148,6 +176,26 @@ if (file_exists($configFile)) {
 // ─── AJAX detection ───────────────────────────────────────────────────────
 $isAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
+// ─── One-Click "Delete install.php" (security hardening) ──────────────────
+// Runs BEFORE the form handling so it also works on an already-installed
+// (locked) site. Deleting the installer is always the safe direction.
+if ($isAjax && ($_POST['installer_action'] ?? '') === 'delete') {
+    header('Content-Type: application/json');
+    $target = __FILE__;
+    if (!is_file($target)) {
+        echo json_encode(['success' => false, 'message' => 'install.php not found — nothing to delete.']);
+        exit;
+    }
+    $ok = @unlink($target);
+    echo json_encode([
+        'success' => $ok,
+        'message' => $ok
+            ? 'install.php has been deleted from the server. ✅'
+            : 'Could not delete install.php — check file/folder permissions, then delete it manually via FTP.',
+    ]);
+    exit;
+}
+
 // ─── Handle Form Submission ────────────────────────────────────────────────
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -166,6 +214,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $adminEmail = $_POST['admin_email'] ?? 'admin@ministries.org';
         $adminPass  = $_POST['admin_password'] ?? '';
         $adminName  = $_POST['admin_name'] ?? 'Admin';
+        $siteUrl    = trim((string)($_POST['site_url'] ?? ''));
 
         if (empty($user) || empty($adminPass)) {
             $error = 'Database username and admin password are required.';
@@ -252,6 +301,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ->execute([$adminEmail, $hash, $adminName]);
                 }
 
+                // ── Save the Site URL (drives absolute logo links and URLs in
+                //    every email, cron-sent notifications and the branded PDF
+                //    export). normalizeSiteUrl() ensures a valid scheme+host.
+                $siteUrlNorm = function_exists('normalizeSiteUrl')
+                    ? normalizeSiteUrl($siteUrl)
+                    : rtrim(trim($siteUrl), '/');
+                try {
+                    if ($siteUrlNorm !== '') setSetting('site_url', $siteUrlNorm);
+                } catch (Throwable $e) { /* non-fatal — emails fall back to the request host */ }
+
                 // ── Ensure upload and session dirs exist ───────────────
                 foreach ([$uploadBase, $uploadBase . '/headers', $uploadBase . '/devotional'] as $d) {
                     if (!is_dir($d)) @mkdir($d, 0777, true);
@@ -326,6 +385,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 } else { $apiDetail = 'cURL unavailable'; }
                 $postTests['api_health'] = ['label'=>'API health (/backend/api/health.php)', 'pass'=>$apiOk, 'detail'=>$apiDetail];
+
+                // ── Site URL + logo reachability (branded emails / PDF exports
+                //    depend on both — the logo URL is embedded in every email) ──
+                $siteBaseUrl = function_exists('siteAbsoluteUrl') ? siteAbsoluteUrl('') : $autoDetectedUrl;
+                $logoUrl    = function_exists('siteLogoUrl') ? siteLogoUrl() : $siteBaseUrl . '/assets/images/dailyimpact.png';
+
+                $siteStatus = httpStatusCheck($siteBaseUrl);
+                $siteUrlOk  = $siteStatus['code'] >= 200 && $siteStatus['code'] < 400;
+                $postTests['site_url'] = [
+                    'label'  => 'Site URL resolves (domain)',
+                    'pass'   => $siteUrlOk,
+                    'detail' => $siteUrlOk
+                        ? "HTTP {$siteStatus['code']} — $siteBaseUrl"
+                        : "HTTP {$siteStatus['code']} — $siteBaseUrl" . ($siteStatus['error'] !== '' ? " ({$siteStatus['error']})" : ''),
+                ];
+
+                $logoStatus = httpStatusCheck($logoUrl);
+                $logoOk     = $logoStatus['code'] >= 200 && $logoStatus['code'] < 300;
+                $postTests['logo_url'] = [
+                    'label'  => 'Logo URL (emails / PDF exports)',
+                    'pass'   => $logoOk,
+                    'detail' => $logoOk
+                        ? "HTTP {$logoStatus['code']} — $logoUrl"
+                        : "HTTP {$logoStatus['code']} — $logoUrl" . ($logoStatus['error'] !== '' ? " ({$logoStatus['error']})" : ''),
+                ];
+
+                // ── Email transport reachability ──
+                // No API key / SMTP credentials exist at install time, so these
+                // verify the server CAN reach each transport (outbound HTTPS to
+                // the Resend API + a TCP/SMTP handshake), not that a send works.
+                $resendStatus = httpStatusCheck('https://api.resend.com/emails');
+                $resendOk = $resendStatus['code'] > 0;
+                $postTests['resend_api'] = [
+                    'label'  => 'Resend API endpoint reachable (outbound HTTPS)',
+                    'pass'   => $resendOk,
+                    'detail' => $resendOk
+                        ? "HTTP {$resendStatus['code']} — api.resend.com responded (auth not set yet)"
+                        : "No response from api.resend.com" . ($resendStatus['error'] !== '' ? " ({$resendStatus['error']})" : ''),
+                ];
+
+                $smtpHost = 'smtp.gmail.com';
+                $smtpPort = 587;
+                $smtpOk = false; $smtpDetail = '';
+                if (function_exists('fsockopen')) {
+                    $fp = @fsockopen($smtpHost, $smtpPort, $errno, $errstr, 5);
+                    if ($fp) {
+                        // The 5s timeout above only bounds the CONNECTION — bound
+                        // the banner read too, or a silent host could stall the
+                        // install for the full default_socket_timeout (60s).
+                        stream_set_timeout($fp, 5);
+                        $banner = @fgets($fp, 256);
+                        $timedOut = !empty(stream_get_meta_data($fp)['timed_out']);
+                        $smtpOk = is_string($banner) && !$timedOut && str_starts_with(trim($banner), '220');
+                        if ($smtpOk) {
+                            $smtpDetail = "Connected to $smtpHost:$smtpPort — " . trim($banner);
+                        } elseif ($timedOut) {
+                            $smtpDetail = "Connected to $smtpHost:$smtpPort but no greeting within 5s (outbound SMTP may be blocked)";
+                        } else {
+                            $smtpDetail = "Connected to $smtpHost:$smtpPort but no SMTP greeting: " . trim((string)$banner);
+                        }
+                        @fclose($fp);
+                    } else {
+                        $smtpDetail = "Could not connect to $smtpHost:$smtpPort" . ($errstr ? " — $errstr" : '');
+                    }
+                } else {
+                    $smtpDetail = 'fsockopen not available on this server';
+                }
+                $postTests['smtp_connect'] = [
+                    'label'  => 'Outbound SMTP reachable (smtp.gmail.com:587)',
+                    'pass'   => $smtpOk,
+                    'detail' => $smtpDetail,
+                ];
 
                 // DB write test
                 $testDevId = 'test_' . uniqid();
@@ -609,6 +740,9 @@ input.error { border-color: #f87171; }
 .btn-primary:hover { background: #2563eb; transform: translateY(-1px); }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 .btn-success { background: #10b981; color: white; }
+.btn-danger { background: #ef4444; color: white; }
+.btn-danger:hover { background: #dc2626; transform: translateY(-1px); }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .btn-outline { background: transparent; border: 1px solid rgba(255,255,255,0.15); color: #e2e8f0; }
 .btn-outline:hover { background: rgba(255,255,255,0.05); }
 .btn-ghost { background: transparent; color: #94a3b8; }
@@ -684,7 +818,10 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
             <a href="<?= $appRoot ?>/admin/login" class="btn btn-success btn-sm">🔐 Admin Login</a>
             <a href="<?= $backendUrl ?>/debug.php" class="btn btn-outline btn-sm">🩺 Diagnostics</a>
         </div>
-        <p class="note mt-3">⚠️ Delete <code>install.php</code> from your server now.</p>
+        <div class="text-center mt-3">
+            <button type="button" class="btn btn-danger" onclick="deleteInstaller(this)">🗑️ Delete install.php Now</button>
+            <div id="deleteInstallerMsg"></div>
+        </div>
     </div>
 
 <?php elseif ($alreadyInstalled): ?>
@@ -700,6 +837,10 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
         <div class="warn-box" style="text-align:left;">
             ⚠️ For security, delete <code>backend/install.php</code> from your server.
         </div>
+        <div class="mt-2">
+            <button type="button" class="btn btn-danger" onclick="deleteInstaller(this)">🗑️ Delete install.php Now</button>
+        </div>
+        <div id="deleteInstallerMsg"></div>
         <?php
         $lockScriptDir = dirname($_SERVER['SCRIPT_NAME']);
         $lockAppRoot = $lockScriptDir === '/' ? '' : rtrim(dirname($lockScriptDir), '/');
@@ -828,6 +969,20 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
                         </div>
                     </div>
                 </div>
+
+                <!-- Site URL — the public domain, used for the logo link and
+                     absolute URLs in every email / branded PDF export. -->
+                <div class="form-group">
+                    <label>Site URL (domain)</label>
+                    <input type="url" name="site_url" id="site_url"
+                           value="<?= htmlspecialchars($_POST['site_url'] ?? $autoDetectedUrl) ?>"
+                           placeholder="https://dailyimpact.org">
+                    <small style="color:#64748b; font-size:0.72rem; display:block; margin-top:0.25rem;">
+                        The public domain where this site is installed. Used for the logo link and absolute URLs in
+                        every email (login alerts, receipts) and the branded PDF export — auto-detected from this
+                        browser, adjust it if your site runs on a different domain.
+                    </small>
+                </div>
                 <div class="btn-group">
                     <button type="button" class="btn btn-ghost" onclick="goStep(2)">← Back</button>
                     <button type="button" class="btn btn-primary" onclick="goStep(4)">Review → Confirm</button>
@@ -844,6 +999,7 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
                     <tr><td>Database User</td><td id="review_user">—</td></tr>
                     <tr><td>Admin Email</td><td id="review_email">—</td></tr>
                     <tr><td>Admin Name</td><td id="review_name_field">Admin</td></tr>
+                    <tr><td>Site URL</td><td id="review_site_url">—</td></tr>
                     <tr><td>Uploads Directory</td><td><?= htmlspecialchars($uploadBase) ?></td></tr>
                 </table>
 
@@ -966,6 +1122,33 @@ async function testUpload(btn) {
         result.innerHTML = '\u274C Could not reach server: ' + e.message;
     }
     btn.disabled = false;
+}
+
+// ── One-Click: Delete install.php from the server ──
+async function deleteInstaller(btn) {
+    btn.disabled = true;
+    btn.textContent = 'Deleting...';
+    const msgEl = document.getElementById('deleteInstallerMsg');
+    try {
+        const res = await fetch('', {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'installer_action=delete',
+        });
+        const json = await res.json().catch(() => ({}));
+        if (json.success) {
+            if (msgEl) msgEl.innerHTML = '<div class="success-box" style="margin-top:0.75rem;">✅ ' + (json.message || 'install.php deleted!') + '</div>';
+            btn.remove();
+        } else {
+            if (msgEl) msgEl.innerHTML = '<div class="warn-box" style="margin-top:0.75rem;">⚠️ ' + (json.message || 'Could not delete the file.') + '</div>';
+            btn.disabled = false;
+            btn.textContent = '🗑️ Delete install.php Now';
+        }
+    } catch (e) {
+        if (msgEl) msgEl.innerHTML = '<div class="warn-box" style="margin-top:0.75rem;">⚠️ Could not reach the server.</div>';
+        btn.disabled = false;
+        btn.textContent = '🗑️ Delete install.php Now';
+    }
 }
 
 // ── AJAX Install with Progress Bar ──
@@ -1124,7 +1307,10 @@ function renderResults(data) {
         '<a href="' + adminPath + '" class="btn btn-success">\uD83D\uDD10 Login to Dashboard</a>' +
         '<a href="' + debugPath + '" class="btn btn-outline">\uD83D\uDC89 Diagnostics</a>' +
         '</div>' +
-        '<p class="note mt-3">\u26A0\uFE0F Delete <code>install.php</code> from your server now.</p>'
+        '<div class="text-center mt-3">' +
+        '<button type="button" class="btn btn-danger" onclick="deleteInstaller(this)">\uD83D\uDDD1\uFE0F Delete install.php Now</button>' +
+        '<div id="deleteInstallerMsg"></div>' +
+        '</div>'
     );
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1174,6 +1360,7 @@ function renderResults(data) {
             document.getElementById('review_user').textContent = document.querySelector('[name="db_user"]').value || '(empty)';
             document.getElementById('review_email').textContent = document.getElementById('admin_email').value || '(empty)';
             document.getElementById('review_name_field').textContent = document.querySelector('[name="admin_name"]').value || 'Admin';
+            document.getElementById('review_site_url').textContent = document.querySelector('[name="site_url"]').value || '(auto)';
         }
         oldGoStep(n);
     };

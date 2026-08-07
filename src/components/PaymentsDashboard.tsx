@@ -44,6 +44,26 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
   // Every view (stats, chart, table) and both exports respect this switch.
   const [displayCurrency, setDisplayCurrency] = useState<"ALL" | "NGN" | "USD">("ALL");
 
+  // Logo shown in the branded PDF header — honours the admin's custom logo
+  // from Settings → Email branding, falling back to the packaged logo. Relative
+  // paths are resolved against the current origin so the export window (same
+  // domain) can render them.
+  const [pdfLogoUrl, setPdfLogoUrl] = useState<string>("/assets/images/dailyimpact.png");
+  useEffect(() => {
+    fetch(`${API_BASE}/email-config.php?action=templates`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { branding?: { siteLogoUrl?: string } } | null) => {
+        const logo = (d?.branding?.siteLogoUrl || "").trim();
+        if (!logo) return;
+        setPdfLogoUrl(
+          logo.startsWith("http") || logo.startsWith("data:")
+            ? logo
+            : `${window.location.origin}${logo.startsWith("/") ? "" : "/"}${logo}`
+        );
+      })
+      .catch(() => { /* keep default logo */ });
+  }, []);
+
   const loadDonations = async () => {
     setIsLoading(true);
     try {
@@ -190,7 +210,10 @@ export default function PaymentsDashboard({ isDarkMode, onShowToast }: PaymentsD
   .foot { margin-top: 24px; font-size: 10px; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 10px; }
 </style></head><body>
   <div class="brand">
-    <div><h1>Daily Impact Devotional</h1><p>Donations Report — generated ${new Date().toLocaleString()}</p></div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <img src="${pdfLogoUrl}" alt="Daily Impact Devotional" style="height:44px;width:auto;" onerror="this.style.display='none'" />
+      <div><h1>Daily Impact Devotional</h1><p>Donations Report — generated ${new Date().toLocaleString()}</p></div>
+    </div>
     <div>${totalSummary}</div>
   </div>
   <div class="filters">Currency: <b>${currencyFilter}</b> · Status: <b>${statusFilter}</b> · Provider: <b>${providerFilter}</b> · ${filtered.length} record(s)</div>

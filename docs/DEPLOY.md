@@ -130,7 +130,7 @@ public_html/
 
 ## Step 3: Run the Installer
 
-1. Visit **`https://yourdomain.com/install.php`** in your browser
+1. Visit **`https://yourdomain.com/backend/install.php`** in your browser
 2. Fill in the MySQL details from Step 2
 3. Set your **Admin Email** and **Password** (the admin password for logging into the dashboard)
 4. Click **Install Now**

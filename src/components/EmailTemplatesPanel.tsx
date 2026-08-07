@@ -12,6 +12,7 @@ interface Template {
 }
 interface Branding {
   siteName: string;
+  siteUrl: string;
   siteLogoUrl: string;
   socialFacebook: string;
   socialTwitter: string;
@@ -103,7 +104,7 @@ const BLOCK_DEFAULTS: Record<string, EmailBlock[]> = {
 
 export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [branding, setBranding] = useState<Branding>({ siteName: "Daily Impact Devotional", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" });
+  const [branding, setBranding] = useState<Branding>({ siteName: "Daily Impact Devotional", siteUrl: "", siteLogoUrl: "", socialFacebook: "", socialTwitter: "", socialInstagram: "", socialYoutube: "" });
   const [activeKey, setActiveKey] = useState("donor_receipt");
   const [mode, setMode] = useState<"visual" | "code">("visual");
   const [loading, setLoading] = useState(true);
@@ -296,6 +297,11 @@ export default function EmailTemplatesPanel({ isDarkMode, showToast }: Props) {
               <div className="space-y-1">
                 <label className="block text-[9px] uppercase font-bold tracking-wider text-slate-400">Site name</label>
                 <input type="text" value={branding.siteName} onChange={e => setBranding(b => ({ ...b, siteName: e.target.value }))} className={input} />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-[9px] uppercase font-bold tracking-wider text-slate-400">Site URL (domain)</label>
+                <input type="text" value={branding.siteUrl} onChange={e => setBranding(b => ({ ...b, siteUrl: e.target.value }))} placeholder="https://dailyimpact.org" className={input} />
+                <p className="text-[8px] text-slate-400 font-semibold">Used for absolute logo links and URLs inside every email and the branded PDF export.</p>
               </div>
               <div className="space-y-1">
                 <label className="block text-[9px] uppercase font-bold tracking-wider text-slate-400">Logo URL (absolute or /path)</label>

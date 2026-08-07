@@ -591,6 +591,9 @@ export default function Dashboard({
   const [telegramFooterText, setTelegramFooterText] = useState("Join our Telegram channel for daily impact words!");
   const [telegramScheduleMode, setTelegramScheduleMode] = useState("scheduled");
   const [telegramShowToken, setTelegramShowToken] = useState(false);
+  // Cron Secret Key — protects the HTTP cron URL (CLI cron ignores it).
+  const [telegramCronKey, setTelegramCronKey] = useState("");
+  const [telegramShowCronKey, setTelegramShowCronKey] = useState(false);
   const [telegramVerifyResult, setTelegramVerifyResult] = useState<{ success: boolean; botName?: string; channelTitle?: string; error?: string } | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [selectedTestDevId, setSelectedTestDevId] = useState("");
@@ -716,6 +719,8 @@ export default function Dashboard({
   const [tgSchedLoading, setTgSchedLoading] = useState(false);
   // devotionalId currently running a schedule/unschedule/send action
   const [tgSchedBusyId, setTgSchedBusyId] = useState<string>("");
+  // Devotional ids ticked for bulk schedule/unschedule in the Broadcast Scheduler.
+  const [tgSelectedIds, setTgSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
     fetch(`${API_BASE}/settings.php`)
@@ -748,6 +753,7 @@ export default function Dashboard({
     };
     setTelegramBotToken(pick("telegram_bot_token"));
     setTelegramChannelId(pick("telegram_channel_id"));
+    setTelegramCronKey(pick("cron_secret_key"));
     setTelegramEnabled(pick("telegram_enabled", "false") === "true");
     setTelegramPostTime(pick("telegram_post_time", "06:00"));
     setTelegramFooterText(pick("telegram_footer_text", "Join our Telegram channel for daily impact words!"));
@@ -894,16 +900,24 @@ export default function Dashboard({
           const data = await res.json();
           // Merge so the new notification-toggle fields default correctly even
           // if an older server response omits them.
-          setEmailConfig((prev) => ({
-            ...prev,
-            ...data,
-            resend: { ...prev.resend, ...(data?.resend || {}) },
-            smtp: { ...prev.smtp, ...(data?.smtp || {}) },
-            donation: { ...prev.donation, ...(data?.donation || {}) },
-            notifyEvents: { ...prev.notifyEvents, ...(data?.notifyEvents || {}) },
-            donationNotifyEmails: data?.donationNotifyEmails ?? prev.donationNotifyEmails,
-            notifyEmails: data?.notifyEmails ?? prev.notifyEmails,
-          }));
+          setEmailConfig((prev) => {
+            const merged = {
+              ...prev,
+              ...data,
+              resend: { ...prev.resend, ...(data?.resend || {}) },
+              smtp: { ...prev.smtp, ...(data?.smtp || {}) },
+              donation: { ...prev.donation, ...(data?.donation || {}) },
+              notifyEvents: { ...prev.notifyEvents, ...(data?.notifyEvents || {}) },
+              donationNotifyEmails: data?.donationNotifyEmails ?? prev.donationNotifyEmails,
+              notifyEmails: data?.notifyEmails ?? prev.notifyEmails,
+            };
+            // Primary and Secondary must stay different — they define the send
+            // sequence (primary first, secondary as fallback).
+            const primary = merged.mailMethod === "smtp" ? "smtp" : "resend";
+            let secondary = merged.mailMethodSecondary === "smtp" ? "smtp" : "resend";
+            if (secondary === primary) secondary = primary === "smtp" ? "resend" : "smtp";
+            return { ...merged, mailMethod: primary, mailMethodSecondary: secondary };
+          });
         }
       } catch (error) {
         console.error("Failed to load email config:", error);
@@ -950,11 +964,23 @@ export default function Dashboard({
     }
   };
 
+  // Random 32-char key that protects the HTTP cron URL (CLI cron ignores it).
+  const generateCronKey = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789";
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    let key = "";
+    for (let i = 0; i < bytes.length; i++) key += chars[bytes[i] % chars.length];
+    setTelegramCronKey(key);
+    setTelegramShowCronKey(true);
+  };
+
   const handleSaveTelegramConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     const settings = {
       telegram_bot_token: telegramBotToken,
       telegram_channel_id: telegramChannelId,
+      cron_secret_key: telegramCronKey,
       telegram_enabled: telegramEnabled ? "true" : "false",
       telegram_post_time: telegramPostTime,
       telegram_footer_text: telegramFooterText,
@@ -1054,6 +1080,7 @@ export default function Dashboard({
       const json = await res.json() as { success?: boolean; scheduled?: number; error?: string };
       if (json.success) {
         showToast(`${json.scheduled ?? devIds.length} devotional(s) scheduled for ${telegramPostTime}.`, "success");
+        setTgSelectedIds([]);
       } else {
         showToast(`Schedule failed: ${json.error}`, "error");
       }
@@ -1077,6 +1104,7 @@ export default function Dashboard({
       const json = await res.json() as { success?: boolean; removed?: number; error?: string };
       if (json.success) {
         showToast(`${json.removed ?? devIds.length} scheduled post(s) removed.`, "info");
+        setTgSelectedIds([]);
       } else {
         showToast(`Unschedule failed: ${json.error}`, "error");
       }
@@ -1158,6 +1186,20 @@ export default function Dashboard({
       return !row || (row.status !== "scheduled" && row.status !== "sent");
     })
     .map(d => d.id);
+
+  // ── Bulk selection (Broadcast Scheduler) ──────────────────────────────────
+  const tgMonthIds = tgMonthDevotionals.map(d => d.id);
+  const tgAllSelected = tgMonthIds.length > 0 && tgMonthIds.every(id => tgSelectedIds.includes(id));
+  const tgToggleSelect = (id: string) =>
+    setTgSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const tgToggleSelectAll = () => setTgSelectedIds(tgAllSelected ? [] : tgMonthIds);
+  // Selected ids the bulk actions can actually act on — avoids re-scheduling
+  // already-sent broadcasts or unscheduling rows that aren't pending.
+  const tgSchedulableSelected = tgSelectedIds.filter(id => {
+    const row = tgSchedMap[id];
+    return !row || (row.status !== "scheduled" && row.status !== "sent");
+  });
+  const tgUnschedulableSelected = tgSelectedIds.filter(id => tgSchedMap[id]?.status === "scheduled");
 
   // Devotionals for the TESTBED's own month/year filter.
   const tbDevotionals = devotionals.filter(d => {
@@ -1562,6 +1604,7 @@ export default function Dashboard({
   // Email Configuration State
   const [emailConfig, setEmailConfig] = useState({
     mailMethod: 'resend',
+    mailMethodSecondary: 'smtp',
     resend: {
       apiKey: '',
       fromEmail: '',
@@ -4819,38 +4862,64 @@ export default function Dashboard({
 
                           <div className="space-y-4">
                             <p className="text-[11px] leading-relaxed text-slate-500">
-                              Delivery sequence: the <strong>Primary</strong> method is tried first; if it fails
-                              (or isn't enabled) the system automatically retries with the <strong>Secondary</strong>.
-                              Both are configured below — the badges show which role each one plays.
+                              Pick which transport is <strong>Primary</strong> and which is <strong>Secondary</strong> with
+                              the dropdowns below. Every email from the app follows this sequence: the Primary is tried
+                              first; if it fails (or isn't enabled) the system automatically retries with the Secondary.
+                              The two sections below only configure each transport.
                             </p>
 
-                            {/* Mail Method Selection */}
+                            {/* Delivery Sequence — Primary + Secondary dropdowns (mutually exclusive) */}
                             <div className="space-y-2">
-                              <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Primary Email Method</label>
-                              <div className="flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setEmailConfig({ ...emailConfig, mailMethod: 'resend' })}
-                                  className={`flex-1 py-2 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
-                                    emailConfig.mailMethod === 'resend'
-                                      ? 'bg-teal-brand text-white'
-                                      : isDarkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'
-                                  }`}
-                                >
-                                  Resend API
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEmailConfig({ ...emailConfig, mailMethod: 'smtp' })}
-                                  className={`flex-1 py-2 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
-                                    emailConfig.mailMethod === 'smtp'
-                                      ? 'bg-teal-brand text-white'
-                                      : isDarkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'
-                                  }`}
-                                >
-                                  SMTP
-                                </button>
+                              <label className="text-xs font-bold text-slate-500 dark:text-slate-400 block">Email Delivery Sequence</label>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <label className="block text-[10px] uppercase text-slate-400 font-black tracking-wider">
+                                    Primary <span className="text-teal-brand normal-case font-bold">(tried first)</span>
+                                  </label>
+                                  <select
+                                    value={emailConfig.mailMethod}
+                                    onChange={(e) => {
+                                      const primary = e.target.value === "smtp" ? "smtp" : "resend";
+                                      setEmailConfig((prev) => ({
+                                        ...prev,
+                                        mailMethod: primary,
+                                        // Keep the Secondary different — swap if it would match.
+                                        mailMethodSecondary: prev.mailMethodSecondary === primary
+                                          ? (primary === "smtp" ? "resend" : "smtp")
+                                          : prev.mailMethodSecondary,
+                                      }));
+                                    }}
+                                    className={`w-full py-2 pl-3 pr-8 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-xs font-bold ${
+                                      isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                                    }`}
+                                  >
+                                    <option value="resend">Resend API</option>
+                                    <option value="smtp">SMTP</option>
+                                  </select>
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="block text-[10px] uppercase text-slate-400 font-black tracking-wider">
+                                    Secondary <span className="text-amber-500 normal-case font-bold">(fallback)</span>
+                                  </label>
+                                  <select
+                                    value={emailConfig.mailMethodSecondary}
+                                    onChange={(e) => {
+                                      const secondary = e.target.value === "smtp" ? "smtp" : "resend";
+                                      setEmailConfig((prev) => ({ ...prev, mailMethodSecondary: secondary }));
+                                    }}
+                                    className={`w-full py-2 pl-3 pr-8 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-brand/20 text-xs font-bold ${
+                                      isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                                    }`}
+                                  >
+                                    <option value="smtp" disabled={emailConfig.mailMethod === "smtp"}>SMTP</option>
+                                    <option value="resend" disabled={emailConfig.mailMethod === "resend"}>Resend API</option>
+                                  </select>
+                                </div>
                               </div>
+                              <p className="text-[10px] text-slate-400 font-semibold">
+                                Emails are sent via <strong className="text-teal-brand">Primary</strong> first, then{" "}
+                                <strong className="text-amber-500">Secondary</strong> if the primary fails.
+                              </p>
                             </div>
 
                             {/* Resend Configuration — always visible; PRIMARY or SECONDARY badge */}
@@ -5426,6 +5495,44 @@ export default function Dashboard({
                           </p>
                         </div>
 
+                        {/* Cron Secret Key — protects the HTTP cron URL */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between items-center">
+                            <label className="text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
+                              Cron Secret Key
+                            </label>
+                            <button
+                              type="button"
+                              onClick={generateCronKey}
+                              className="text-[9px] text-teal-brand font-black uppercase tracking-widest hover:underline flex items-center gap-1"
+                            >
+                              <RefreshCw className="w-3 h-3" /> Generate
+                            </button>
+                          </div>
+                          <div className="relative">
+                            <input
+                              type={telegramShowCronKey ? "text" : "password"}
+                              value={telegramCronKey}
+                              onChange={(e) => setTelegramCronKey(e.target.value)}
+                              placeholder="Optional — protects the HTTP cron URL"
+                              className={`w-full py-2.5 pl-3 pr-10 border rounded-xl focus:outline-none ${
+                                isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setTelegramShowCronKey(!telegramShowCronKey)}
+                              className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-white"
+                              title={telegramShowCronKey ? "Hide key" : "Show key"}
+                            >
+                              <Eye className="w-4 h-4" />
+                            </button>
+                          </div>
+                          <p className="text-[9px] text-slate-400 font-medium leading-relaxed">
+                            Only needed when the cron runs over HTTP (Option B in the Cron Setup modal). Your cPanel <b>CLI</b> cron needs <b>no key</b>. Press <b>Generate</b> then <b>Save Telegram Settings</b>.
+                          </p>
+                        </div>
+
                         {/* Verify Connection Button */}
                         <div className="flex flex-col gap-2">
                           <button
@@ -5678,7 +5785,7 @@ export default function Dashboard({
                           <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">Month</label>
                           <select
                             value={tgSchedMonth}
-                            onChange={(e) => setTgSchedMonth(e.target.value)}
+                            onChange={(e) => { setTgSchedMonth(e.target.value); setTgSelectedIds([]); }}
                             className={`py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${
                               isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
                             }`}
@@ -5692,7 +5799,7 @@ export default function Dashboard({
                           <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">Year</label>
                           <select
                             value={tgSchedYear}
-                            onChange={(e) => setTgSchedYear(parseInt(e.target.value, 10))}
+                            onChange={(e) => { setTgSchedYear(parseInt(e.target.value, 10)); setTgSelectedIds([]); }}
                             className={`py-2 px-2.5 border rounded-xl text-xs font-semibold focus:outline-none ${
                               isDarkMode ? "bg-slate-950 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-slate-900"
                             }`}
@@ -5747,6 +5854,44 @@ export default function Dashboard({
                       )}
                     </div>
 
+                    {/* Bulk actions for the ticked devotionals */}
+                    {tgSelectedIds.length > 0 && (
+                      <div className={`flex flex-wrap items-center gap-2 rounded-xl border px-4 py-3 ${
+                        isDarkMode ? "border-teal-brand/30 bg-teal-brand/10" : "border-teal-brand/40 bg-teal-brand/5"
+                      }`}>
+                        <span className="text-[10px] font-black uppercase tracking-wider text-teal-brand mr-1">
+                          {tgSelectedIds.length} selected
+                        </span>
+                        <button
+                          type="button"
+                          disabled={tgSchedBusyId !== "" || tgSchedulableSelected.length === 0}
+                          onClick={() => tgSchedule(tgSchedulableSelected)}
+                          className="inline-flex items-center gap-1.5 py-2 px-4 rounded-xl bg-teal-brand text-white text-[10px] font-black uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-40"
+                        >
+                          <Calendar className="w-3.5 h-3.5" />
+                          Schedule selected ({tgSchedulableSelected.length})
+                        </button>
+                        <button
+                          type="button"
+                          disabled={tgSchedBusyId !== "" || tgUnschedulableSelected.length === 0}
+                          onClick={() => tgUnschedule(tgUnschedulableSelected)}
+                          className="inline-flex items-center gap-1.5 py-2 px-4 rounded-xl bg-rose-500 text-white text-[10px] font-black uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-40"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Unschedule selected ({tgUnschedulableSelected.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTgSelectedIds([])}
+                          className={`py-2 px-3 rounded-xl border text-[10px] font-black uppercase tracking-wider transition-all hover:bg-slate-100 dark:hover:bg-slate-800 ${
+                            isDarkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-500"
+                          }`}
+                        >
+                          Clear selection
+                        </button>
+                      </div>
+                    )}
+
                     {/* Devotional rows for the selected month/year */}
                     <div className={`rounded-xl border overflow-hidden ${
                       isDarkMode ? "border-slate-800" : "border-slate-200"
@@ -5758,15 +5903,51 @@ export default function Dashboard({
                           No devotionals uploaded for {tgSchedMonth} {tgSchedYear}. Upload some in "Add Devotional" or "Import Devotional" first.
                         </p>
                       ) : (
-                        <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
-                          {tgMonthDevotionals.map(dev => {
-                            const row = tgSchedMap[dev.id];
-                            const busy = tgSchedBusyId === dev.id;
-                            return (
-                              <div key={dev.id} className={`flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3 ${
-                                isDarkMode ? "bg-slate-900/40" : "bg-white"
-                              }`}>
-                                {/* Date + title */}
+                        <>
+                          {/* Select-all header bar */}
+                          <div className={`flex items-center justify-between gap-2 px-4 py-2 border-b ${
+                            isDarkMode ? "border-slate-800 bg-slate-900/60" : "border-slate-200 bg-slate-50"
+                          }`}>
+                            <label className="flex items-center gap-2 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={tgAllSelected}
+                                onChange={tgToggleSelectAll}
+                                className="accent-teal-brand w-4 h-4 cursor-pointer"
+                              />
+                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                {tgAllSelected ? "All listed selected" : `Select all ${tgMonthDevotionals.length} for ${tgSchedMonth}`}
+                              </span>
+                            </label>
+                            {tgSelectedIds.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setTgSelectedIds([])}
+                                className="text-[10px] font-black uppercase tracking-wider text-slate-400 hover:text-rose-500 transition-colors"
+                              >
+                                Clear ({tgSelectedIds.length})
+                              </button>
+                            )}
+                          </div>
+                          <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                            {tgMonthDevotionals.map(dev => {
+                              const row = tgSchedMap[dev.id];
+                              const busy = tgSchedBusyId === dev.id;
+                              return (
+                                <div key={dev.id} className={`flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3 ${
+                                  isDarkMode ? "bg-slate-900/40" : "bg-white"
+                                }`}>
+                                  {/* Select */}
+                                  <div className="shrink-0">
+                                    <input
+                                      type="checkbox"
+                                      checked={tgSelectedIds.includes(dev.id)}
+                                      onChange={() => tgToggleSelect(dev.id)}
+                                      className="accent-teal-brand w-4 h-4 cursor-pointer"
+                                      title={`Select ${dev.title}`}
+                                    />
+                                  </div>
+                                  {/* Date + title */}
                                 <div className="min-w-0 flex-1">
                                   <p className={`text-[10px] font-black uppercase tracking-wider ${
                                     isDarkMode ? "text-slate-500" : "text-slate-400"
@@ -5876,8 +6057,9 @@ export default function Dashboard({
                                 </div>
                               </div>
                             );
-                          })}
-                        </div>
+                            })}
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
@@ -5958,11 +6140,30 @@ export default function Dashboard({
                           }`}>
                             <p className="font-black uppercase tracking-wider text-amber-500 text-[10px]">Option B — URL (any host)</p>
                             <p className="text-slate-600 dark:text-slate-300">
-                              If your host cannot run PHP via cron, call the endpoint with curl every minute (replace <b>YOURDOMAIN.com</b>):
+                              If your host cannot run PHP via cron, call the endpoint with curl every minute. This URL requires the <b>Cron Secret Key</b> from the Telegram settings above (replace <b>YOURDOMAIN.com</b>):
                             </p>
-                            <code className="block font-mono text-[10px] bg-slate-950 text-emerald-400 border border-slate-800 rounded-lg px-3 py-2.5 overflow-x-auto whitespace-nowrap">
-                              curl -s "https://YOURDOMAIN.com/backend/api/telegram-cron.php" &gt;/dev/null 2&gt;&amp;1
-                            </code>
+                            <div className="flex items-center gap-2">
+                              <code className="flex-1 font-mono text-[10px] bg-slate-950 text-emerald-400 border border-slate-800 rounded-lg px-3 py-2.5 overflow-x-auto whitespace-nowrap">
+                                curl -s "https://YOURDOMAIN.com/backend/api/telegram-cron.php{telegramCronKey ? `?key=${telegramCronKey}` : "?key=YOUR_CRON_SECRET_KEY"}" &gt;/dev/null 2&gt;&amp;1
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const url = `https://YOURDOMAIN.com/backend/api/telegram-cron.php${telegramCronKey ? `?key=${telegramCronKey}` : "?key=YOUR_CRON_SECRET_KEY"}`;
+                                  navigator.clipboard.writeText(`curl -s "${url}" >/dev/null 2>&1`).catch(() => {});
+                                  setCronCopied(true);
+                                  setTimeout(() => setCronCopied(false), 2000);
+                                }}
+                                className="shrink-0 px-3 py-2.5 rounded-lg border border-teal-brand/20 bg-teal-brand/5 text-teal-brand text-[10px] font-black uppercase tracking-wider hover:bg-teal-brand hover:text-white transition-all"
+                              >
+                                {cronCopied ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                            {!telegramCronKey && (
+                              <p className="text-amber-600 dark:text-amber-400 text-[10px] font-bold">
+                                ⚠ No key set yet — press <b>Generate</b> in Telegram settings and save first, or the URL returns 403. (Your CLI cron needs no key.)
+                              </p>
+                            )}
                           </div>
 
                           <div className={`p-3 rounded-xl border ${

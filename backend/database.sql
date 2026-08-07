@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS `mail_queue` (
     `html` MEDIUMTEXT NULL COMMENT 'Branded HTML body (rendered from email templates)',
     `sent` TINYINT(1) DEFAULT 0,
     `sent_at` TIMESTAMP NULL,
+    `method` VARCHAR(20) DEFAULT NULL COMMENT 'Transport that delivered it (resend|smtp), or last tried on failure',
+    `attempts` INT NOT NULL DEFAULT 0 COMMENT 'Number of send attempts (primary + secondary fallback per attempt)',
+    `last_attempt_at` TIMESTAMP NULL,
     `error` TEXT,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_sent` (`sent`)

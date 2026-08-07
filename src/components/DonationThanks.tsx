@@ -41,7 +41,7 @@ export default function DonationThanks({ name, amount, currency, isDarkMode, onC
     let height = (canvas.height = window.innerHeight);
     let raf = 0;
     let startedAt = Date.now();
-    const DURATION = 6000; // ms of active falling before we fade out
+    const DURATION = 6000; // ms of active flying before we fade out
 
     const colors = ["#0d9488", "#f59e0b", "#10b981", "#fbbf24", "#14b8a6", "#f97316", "#ffffff"];
 
@@ -53,11 +53,11 @@ export default function DonationThanks({ name, amount, currency, isDarkMode, onC
 
     const pieces: Piece[] = Array.from({ length: 180 }, () => ({
       x: Math.random() * width,
-      y: -30 - Math.random() * height * 0.4,
+      y: height + 30 + Math.random() * height * 0.4,
       w: 6 + Math.random() * 7,
       h: 9 + Math.random() * 8,
       color: colors[Math.floor(Math.random() * colors.length)],
-      vy: 1.6 + Math.random() * 2.6,
+      vy: -(1.6 + Math.random() * 2.6),
       vx: (Math.random() - 0.5) * 1.2,
       sway: 0.6 + Math.random() * 1.4,
       phase: Math.random() * Math.PI * 2,
@@ -78,14 +78,14 @@ export default function DonationThanks({ name, amount, currency, isDarkMode, onC
       ctx.clearRect(0, 0, width, height);
 
       for (const p of pieces) {
-        p.vy += 0.012; // gravity
+        p.vy += 0.012; // gravity gradually slows the rise, then pulls back down
         p.phase += 0.03;
         p.x += p.vx + Math.sin(p.phase) * p.sway * 0.4;
         p.y += p.vy;
         p.rot += p.vr;
-        if (p.y > height + 40) {
-          // Recycle from the top so the celebration keeps flowing
-          p.y = -30;
+        if (p.y < -height - 40) {
+          // Recycle from the bottom so the fountain keeps flowing
+          p.y = height + 30;
           p.x = Math.random() * width;
         }
         ctx.save();

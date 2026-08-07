@@ -31,6 +31,7 @@ switch ($method) {
             'telegram_schedule_mode'=> 'scheduled',
             'telegram_bot_token'    => '',
             'telegram_channel_id'   => '',
+            'cron_secret_key'       => '',
             'telegram_footer_text'  => 'Join our Telegram channel for daily impact! 📖🔥',
             'notify_email'          => '',
             'donation_notify_emails'=> '',

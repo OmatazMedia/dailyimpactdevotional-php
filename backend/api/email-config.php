@@ -38,6 +38,9 @@ switch ($method) {
                 'templates' => $out,
                 'branding'  => [
                     'siteName'    => (string)getSetting('site_name', 'Daily Impact Devotional'),
+                    // The site's public domain URL — used for absolute logo links
+                    // and URLs in emails/PDF exports (set at install time).
+                    'siteUrl'     => (string)getSetting('site_url', ''),
                     'siteLogoUrl' => (string)getSetting('site_logo_url', ''),
                     'socialFacebook'  => (string)getSetting('social_facebook', ''),
                     'socialTwitter'   => (string)getSetting('social_twitter', ''),
@@ -50,6 +53,12 @@ switch ($method) {
         // Get email configuration
         $config = [
             'mailMethod' => getSetting('mail_method', 'resend'),
+            // The SECONDARY (fallback) transport — always kept different from
+            // the primary. Defaults to whichever one is NOT primary.
+            'mailMethodSecondary' => getSetting(
+                'mail_method_secondary',
+                getSetting('mail_method', 'resend') === 'smtp' ? 'resend' : 'smtp'
+            ),
             'resend' => [
                 'apiKey' => getSetting('resend_api_key', ''),
                 'fromEmail' => getSetting('resend_from_email', ''),
@@ -115,6 +124,13 @@ switch ($method) {
             $branding = $input['branding'] ?? null;
             if (is_array($branding)) {
                 if (isset($branding['siteName']))    setSetting('site_name', mb_substr((string)$branding['siteName'], 0, 120));
+                if (isset($branding['siteUrl'])) {
+                    // Guard for hosts preserving an older db.php (no helper).
+                    $normalized = function_exists('normalizeSiteUrl')
+                        ? normalizeSiteUrl((string)$branding['siteUrl'])
+                        : rtrim(trim((string)$branding['siteUrl']), '/');
+                    if ($normalized !== '') setSetting('site_url', mb_substr($normalized, 0, 200));
+                }
                 if (isset($branding['siteLogoUrl'])) setSetting('site_logo_url', mb_substr((string)$branding['siteLogoUrl'], 0, 500));
                 foreach (['socialFacebook', 'socialTwitter', 'socialInstagram', 'socialYoutube'] as $s) {
                     if (isset($branding[$s])) {
@@ -128,6 +144,16 @@ switch ($method) {
         // Update mail method (the PRIMARY transport)
         if (isset($input['mailMethod'])) {
             setSetting('mail_method', $input['mailMethod'] === 'smtp' ? 'smtp' : 'resend');
+        }
+
+        // Update the SECONDARY (fallback) transport — kept different from primary.
+        if (isset($input['mailMethodSecondary'])) {
+            $primary = (string)getSetting('mail_method', 'resend');
+            $secondary = $input['mailMethodSecondary'] === 'smtp' ? 'smtp' : 'resend';
+            if ($secondary === $primary) {
+                $secondary = $primary === 'smtp' ? 'resend' : 'smtp';
+            }
+            setSetting('mail_method_secondary', $secondary);
         }
 
         // Update Resend settings

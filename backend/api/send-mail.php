@@ -4,7 +4,9 @@
  *
  * Processes queued emails (mail_queue) and delivers each one using the PRIMARY
  * transport (mail_method setting) with the secondary as automatic fallback.
- * Branded HTML bodies are sent when present.
+ * Branded HTML bodies are sent when present. Each row records which transport
+ * delivered it (method), how many attempts were made, and the latest error —
+ * visible in the Mail Delivery Status panel (Settings → Email).
  *
  * Should be run via cron job every minute:
  *   php /home/USERNAME/public_html/backend/api/send-mail.php
@@ -28,13 +30,20 @@ foreach ($emails as $email) {
     $result = mailTransportSend($email);
 
     if ($result['success']) {
-        $update = $pdo->prepare("UPDATE mail_queue SET sent = 1, sent_at = NOW(), error = NULL WHERE id = ?");
-        $update->execute([$email['id']]);
         $processed++;
     } else {
-        $update = $pdo->prepare("UPDATE mail_queue SET error = ? WHERE id = ?");
-        $update->execute([mb_substr($result['error'], 0, 500), $email['id']]);
         $failed++;
+    }
+
+    if (function_exists('updateMailQueueResult')) {
+        updateMailQueueResult($email['id'], $result);
+    } elseif ($result['success']) {
+        // Legacy fallback for hosts preserving an older config/db.php.
+        $upd = $pdo->prepare("UPDATE mail_queue SET sent = 1, sent_at = NOW(), error = NULL WHERE id = ?");
+        $upd->execute([$email['id']]);
+    } else {
+        $upd = $pdo->prepare("UPDATE mail_queue SET error = ? WHERE id = ?");
+        $upd->execute([mb_substr($result['error'], 0, 500), $email['id']]);
     }
 }
 
