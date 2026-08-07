@@ -1,3 +1,13 @@
+# ══════════════════════════════════════════════════════════
+#   Omataz Media — Web Development & Design
+#   Website   : https://www.omatazmedia.com.ng
+#   Email     : hello@omatazmedia.com.ng
+#   Phone     : +234 9024599289, +234 7037373304
+#   WhatsApp  : https://wa.me/message/M3QUHNVONY6NK1
+#   Social    : @omatazmedia — Facebook · Instagram · X · YouTube
+#   GitHub    : https://github.com/omatazmedia
+#   Contact   : Johnson Toluwani
+# ══════════════════════════════════════════════════════════
 # Daily Impact Devotional — harden the upload folder.
 # Uploaded files must NEVER be executed as scripts, even if a filename slips
 # through (defense-in-depth on top of the extension/MIME allowlist in upload.php).

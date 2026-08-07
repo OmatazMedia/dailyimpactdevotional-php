@@ -1,5 +1,11 @@
 # 📖 Daily Impact Devotional
 
+> **Developed by [Omataz Media](https://www.omatazmedia.com.ng)** — Web Development & Design
+> Contact: **Johnson Toluwani** · hello@omatazmedia.com.ng · +234 9024599289, +234 7037373304 · [WhatsApp](https://wa.me/message/M3QUHNVONY6NK1)
+> [Facebook](https://facebook.com/omatazmedia) · [Instagram](https://instagram.com/omatazmedia) · [X](https://x.com/omatazmedia) · [YouTube](https://youtube.com/@omatazmedia) · [GitHub](https://github.com/omatazmedia)
+
+---
+
 A full-stack daily devotional platform by **Dr. Andy Osakwe / Andrew Osakwe Ministries International** — publish scripture-based devotionals, broadcast them automatically to a Telegram channel with their banner artwork, collect donations in multiple currencies, and give readers a beautiful installable PWA reading experience.
 
 ![Daily Impact Devotional](public/assets/images/dailyimpact.png)
@@ -181,4 +187,21 @@ server.ts                      # Local dev mock API (Express, JSON storage)
 
 ---
 
+## 🖊️ Credits
+
+**Daily Impact Devotional** is designed and developed by **[Omataz Media](https://www.omatazmedia.com.ng)**.
+
+| | |
+|---|---|
+| **Company** | Omataz Media — Web Development & Design |
+| **Contact Person** | Johnson Toluwani |
+| **Website** | https://www.omatazmedia.com.ng |
+| **Email** | hello@omatazmedia.com.ng |
+| **Phone** | +234 9024599289, +234 7037373304 |
+| **WhatsApp** | https://wa.me/message/M3QUHNVONY6NK1 |
+| **Social** | @omatazmedia — Facebook · Instagram · X · YouTube · [GitHub](https://github.com/omatazmedia) |
+
+---
+
 <p align="center"><strong>Daily Impact Devotional</strong> — start every day with God's Word. 🙏</p>
+<p align="center">Developed by <a href="https://www.omatazmedia.com.ng">Omataz Media</a> 🚀</p>

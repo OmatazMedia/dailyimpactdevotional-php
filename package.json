@@ -3,6 +3,17 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "author": "Omataz Media <hello@omatazmedia.com.ng> (https://www.omatazmedia.com.ng)",
+  "contact": {
+    "company": "Omataz Media",
+    "person": "Johnson Toluwani",
+    "website": "https://www.omatazmedia.com.ng",
+    "email": "hello@omatazmedia.com.ng",
+    "phone": ["+234 9024599289", "+234 7037373304"],
+    "whatsapp": "https://wa.me/message/M3QUHNVONY6NK1",
+    "social": "@omatazmedia (Facebook, Instagram, X, YouTube)",
+    "github": "https://github.com/omatazmedia"
+  },
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "server": "node_modules\\.bin\\tsx server.ts",

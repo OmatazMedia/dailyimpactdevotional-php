@@ -10,7 +10,18 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceDir = path.join(__dirname, 'cpanel-upload');
-const outFile = path.join(__dirname, 'dailyimpact-devotional-cpanel.zip');
+
+// Timestamped output name (e.g. dailyimpact-devotional-cpanel-2026-08-07-0630.zip)
+// so every deploy package is unique and sortable. Override with a CLI arg:
+//   node zip-deploy.mjs my-custom-name
+const pad = (n) => String(n).padStart(2, '0');
+const d = new Date();
+const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+const customName = process.argv[2];
+const outFile = path.join(
+  __dirname,
+  customName ? `${customName}.zip` : `dailyimpact-devotional-cpanel-${stamp}.zip`
+);
 
 if (!fs.existsSync(sourceDir)) {
   console.error('cpanel-upload folder not found — run the assembly step first.');

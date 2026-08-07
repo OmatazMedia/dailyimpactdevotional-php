@@ -1,11 +1,53 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import {defineConfig, type Plugin} from 'vite';
+
+// Developer credit injected as a comment at the TOP of every built JS + CSS
+// file. Visible when inspecting the bundle in DevTools; never rendered on the
+// website. (The /*! keeps it in the minified output.)
+const OMATAZ_BANNER = `/*!
+ * ══════════════════════════════════════════════════════════
+ *   Omataz Media — Web Development & Design
+ *   Project   : Daily Impact Devotional
+ *   Website   : https://www.omatazmedia.com.ng
+ *   Email     : hello@omatazmedia.com.ng
+ *   Phone     : +234 9024599289, +234 7037373304
+ *   WhatsApp  : https://wa.me/message/M3QUHNVONY6NK1
+ *   Social    : @omatazmedia — Facebook · Instagram · X · YouTube
+ *   GitHub    : https://github.com/omatazmedia
+ *   Contact   : Johnson Toluwani
+ * ══════════════════════════════════════════════════════════
+ */
+`;
+
+// Vite only prepends Rollup banners to JS chunks — this small plugin does the
+// same for the emitted CSS asset (runs after Vite's own CSS generation).
+function omatazCssBanner(banner: string): Plugin {
+  return {
+    name: 'omataz-css-banner',
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      for (const file of Object.values(bundle)) {
+        if (file.type === 'asset' && file.fileName.endsWith('.css') && typeof file.source === 'string') {
+          file.source = banner + file.source;
+        }
+      }
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), omatazCssBanner(OMATAZ_BANNER)],
+    build: {
+      rollupOptions: {
+        output: {
+          // Credit comment at the top of every generated JS chunk.
+          banner: OMATAZ_BANNER,
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

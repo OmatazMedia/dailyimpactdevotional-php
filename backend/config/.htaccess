@@ -1,3 +1,13 @@
+# ══════════════════════════════════════════════════════════
+#   Omataz Media — Web Development & Design
+#   Website   : https://www.omatazmedia.com.ng
+#   Email     : hello@omatazmedia.com.ng
+#   Phone     : +234 9024599289, +234 7037373304
+#   WhatsApp  : https://wa.me/message/M3QUHNVONY6NK1
+#   Social    : @omatazmedia — Facebook · Instagram · X · YouTube
+#   GitHub    : https://github.com/omatazmedia
+#   Contact   : Johnson Toluwani
+# ══════════════════════════════════════════════════════════
 # Daily Impact Devotional — protect config files (db.php credentials and the
 # auto-generated secret.key.php encryption key) from direct web access.
 # config/ is only ever reached via server-side includes from api/*.php, so
