@@ -17,6 +17,7 @@ import {
   HelpCircle,
   ChevronRight,
 } from "lucide-react";
+import { API_BASE } from "../config/api";
 
 /**
  * Help Center — a walkthrough for the whole admin dashboard.
@@ -44,6 +45,8 @@ export interface HelpTopic {
   keywords: string[];
   goTo: HelpTarget;
   body: React.ReactNode;
+  /** True for guides written by the Administrator (Settings → Help). */
+  custom?: boolean;
 }
 
 export interface HelpGroup {
@@ -614,6 +617,48 @@ const GROUPS: HelpGroup[] = [
   },
 ];
 
+/** Render a custom guide's body (## heading, - bullet, plain paragraphs). */
+function renderCustomBody(text: string): React.ReactNode {
+  const lines = text.split(/\r?\n/);
+  const out: React.ReactNode[] = [];
+  let bullets: string[] = [];
+  let key = 0;
+  const flushBullets = () => {
+    if (bullets.length === 0) return;
+    out.push(
+      <ul key={`b${key}`} className="mt-2 space-y-1.5 list-disc pl-4 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+        {bullets.map((b, i) => <li key={i}>{b}</li>)}
+      </ul>,
+    );
+    bullets = [];
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    key += 1;
+    if (line.startsWith("## ")) {
+      flushBullets();
+      out.push(
+        <h4 key={`h${key}`} className="mt-3 text-[11px] font-black uppercase tracking-wider text-teal-brand">
+          {line.slice(3)}
+        </h4>,
+      );
+    } else if (line.startsWith("- ")) {
+      bullets.push(line.slice(2));
+    } else if (line === "") {
+      flushBullets();
+    } else {
+      flushBullets();
+      out.push(
+        <p key={`p${key}`} className="mt-2 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+          {line}
+        </p>,
+      );
+    }
+  }
+  flushBullets();
+  return out;
+}
+
 interface HelpCenterProps {
   isDarkMode: boolean;
   canSee: (section: string) => boolean;
@@ -624,9 +669,41 @@ interface HelpCenterProps {
 export default function HelpCenter({ isDarkMode, canSee, onNavigate, onClose }: HelpCenterProps) {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Custom guides written by the Administrator (Settings → Help).
+  const [customTopics, setCustomTopics] = useState<HelpTopic[]>([]);
 
-  // Groups the current role is allowed to see (topics filtered per group).
-  const visibleGroups = useMemo(() => GROUPS.filter((g) => canSee(g.key)), [canSee]);
+  useEffect(() => {
+    fetch(`${API_BASE}/help.php`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { success?: boolean; topics?: Array<{ id: string; section: string; title: string; summary: string; keywords?: string[]; goTo?: { tab: string; subTab?: string }; body: string }> } | null) => {
+        if (!d?.success || !Array.isArray(d.topics)) return;
+        setCustomTopics(
+          d.topics.map((t) => ({
+            id: t.id,
+            section: t.section,
+            title: t.title,
+            summary: t.summary || "",
+            keywords: Array.isArray(t.keywords) ? t.keywords : [],
+            goTo: { tab: t.goTo?.tab || "overview", subTab: t.goTo?.subTab || undefined },
+            body: renderCustomBody(t.body || ""),
+            custom: true,
+          })),
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  // Built-in groups merged with the Administrator's custom guides (assigned to
+  // their chosen section so the role filter still applies).
+  const visibleGroups = useMemo(() => {
+    const groups = GROUPS.map((g) => ({ ...g, topics: [...g.topics] }));
+    for (const ct of customTopics) {
+      const g = groups.find((x) => x.key === ct.section);
+      if (g) g.topics.push(ct);
+      else groups.push({ key: ct.section, label: ct.section, icon: <BookOpen className="w-3.5 h-3.5" />, topics: [ct] });
+    }
+    return groups.filter((g) => canSee(g.key));
+  }, [canSee, customTopics]);
 
   const allVisibleTopics = useMemo(() => visibleGroups.flatMap((g) => g.topics), [visibleGroups]);
 
@@ -808,16 +885,21 @@ export default function HelpCenter({ isDarkMode, canSee, onNavigate, onClose }: 
                       {g.topics.map((t) => (
                         <button
                           key={t.id}
-                          onClick={() => setSelectedId(t.id)}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] font-bold leading-snug transition-colors flex items-start gap-1.5 ${
-                            selectedId === t.id
-                              ? "bg-teal-brand/15 text-teal-brand"
-                              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                          }`}
-                        >
-                          <ChevronRight className={`w-3 h-3 mt-0.5 shrink-0 ${selectedId === t.id ? "opacity-100" : "opacity-0"}`} />
-                          {t.title}
-                        </button>
+                      onClick={() => setSelectedId(t.id)}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] font-bold leading-snug transition-colors flex items-start gap-1.5 ${
+                        selectedId === t.id
+                          ? "bg-teal-brand/15 text-teal-brand"
+                          : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      <ChevronRight className={`w-3 h-3 mt-0.5 shrink-0 ${selectedId === t.id ? "opacity-100" : "opacity-0"}`} />
+                      <span className="min-w-0 flex-1">{t.title}</span>
+                      {t.custom && (
+                        <span className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-teal-brand/10 text-teal-brand shrink-0">
+                          Custom
+                        </span>
+                      )}
+                    </button>
                       ))}
                     </div>
                   </div>
@@ -833,9 +915,16 @@ export default function HelpCenter({ isDarkMode, canSee, onNavigate, onClose }: 
                 <p className="text-[9px] font-black uppercase tracking-widest text-teal-brand mb-1">
                   {visibleGroups.find((g) => g.key === selected.section)?.label ?? selected.section}
                 </p>
-                <h3 className="font-serif text-lg font-black tracking-tight text-slate-900 dark:text-white">
-                  {selected.title}
-                </h3>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-serif text-lg font-black tracking-tight text-slate-900 dark:text-white">
+                    {selected.title}
+                  </h3>
+                  {selected.custom && (
+                    <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-teal-brand/10 text-teal-brand">
+                      Custom guide
+                    </span>
+                  )}
+                </div>
                 <p className="mt-1 text-[11px] text-slate-400 font-semibold leading-relaxed">{selected.summary}</p>
                 <div className="mt-4">{selected.body}</div>
                 <button

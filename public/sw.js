@@ -23,6 +23,7 @@ const PRECACHE_URLS = [
   '/icons/apple-touch-icon.png',
   '/icons/logo-white.png',
   '/assets/images/dailyimpact.png',
+  '/assets/images/did-favicon.png',
 ];
 
 /* ── Install: precache the app shell ─────────────────────────────────── */

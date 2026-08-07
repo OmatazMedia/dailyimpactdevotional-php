@@ -50,6 +50,7 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import OtpCodeInput from "./OtpCodeInput";
 import HelpCenter from "./HelpCenter";
+import HelpSettingsPanel from "./HelpSettingsPanel";
 import { Devotional } from "../types";
 import AddDevotional from "./AddDevotional";
 import ListDevotional from "./ListDevotional";
@@ -1647,14 +1648,14 @@ export default function Dashboard({
   
   // Admin Timezone State
   const [adminTimezone, setAdminTimezone] = useState<string>("Africa/Lagos");
-  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles">("profile");
+  const [settingsSubTab, setSettingsSubTab] = useState<"profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles" | "help">("profile");
 
   // Help Center "Go to page" action — jumps to a dashboard tab (and settings
   // sub-tab when the guide targets one), then closes the overlay.
   const handleHelpNavigate = (tab: string, subTab?: string) => {
     setActiveTab(tab as "overview" | "add-devotional" | "manage-devotionals" | "header-images" | "user-management" | "settings" | "import-devotional" | "telegram-integration" | "foreword" | "payments" | "analytics");
     if (subTab) {
-      setSettingsSubTab(subTab as "profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles");
+      setSettingsSubTab(subTab as "profile" | "security" | "assets" | "email" | "templates" | "payments" | "roles" | "help");
     }
     setIsHelpOpen(false);
   };
@@ -4003,6 +4004,21 @@ export default function Dashboard({
                         Roles & Permissions
                       </button>
                     )}
+
+                    {isAdministrator && (
+                      <button
+                        type="button"
+                        onClick={() => setSettingsSubTab("help")}
+                        className={`pb-2.5 px-1 border-b-2 transition-all flex items-center gap-2 ${
+                          settingsSubTab === "help"
+                            ? "border-teal-brand text-teal-brand font-black"
+                            : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                        }`}
+                      >
+                        <BookOpen className="w-4 h-4" />
+                        Help Guides
+                      </button>
+                    )}
                   </div>
 
                   {/* Tab Contents */}
@@ -5469,6 +5485,11 @@ export default function Dashboard({
                           </div>
                         </div>
                       </div>
+                    )}
+
+                    {/* Tab: Custom Help Guides (Administrator) */}
+                    {settingsSubTab === "help" && isAdministrator && (
+                      <HelpSettingsPanel isDarkMode={isDarkMode} showToast={showToast} />
                     )}
 
                   </div>
