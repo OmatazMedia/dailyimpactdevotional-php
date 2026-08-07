@@ -677,6 +677,28 @@ switch ($method) {
                     'reset_url' => $resetUrl,
                 ]);
                 queueMailHtml($email, $rendered['subject'], $rendered['text'], $rendered['html']);
+
+                // Immediate best-effort delivery (primary transport + fallback).
+                // Fresh installs can reset their password before configuring the
+                // cron worker — if this send succeeds the queued row is marked
+                // sent so the cron won't double-send; if it fails the row stays
+                // queued for the cron to retry.
+                try {
+                    $result = mailTransportSend([
+                        'to_email' => $email,
+                        'subject'  => $rendered['subject'],
+                        'body'     => $rendered['text'],
+                        'html'     => $rendered['html'],
+                    ]);
+                    if ($result['success']) {
+                        $pdo->prepare(
+                            "UPDATE mail_queue SET sent = 1, sent_at = NOW(), method = ?, error = NULL
+                             WHERE to_email = ? AND sent = 0 ORDER BY created_at DESC LIMIT 1"
+                        )->execute([$result['method'], $email]);
+                    }
+                } catch (Throwable $e) {
+                    // Leave the row queued — the cron worker will retry it.
+                }
             } catch (Throwable $e) {
                 // Fall back to a plain-text reset email if the engine fails.
                 $subject = "🔑 Password Reset — " . getSetting('site_name', 'Daily Impact Devotional');

@@ -324,6 +324,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($siteUrlNorm !== '') setSetting('site_url', $siteUrlNorm);
                 } catch (Throwable $e) { /* non-fatal — emails fall back to the request host */ }
 
+                // ── Save the Email Transport Configuration (Resend or SMTP) ──
+                // Whatever the admin entered during install is persisted so every
+                // email (password reset, login alerts, donation receipts) can be
+                // sent IMMEDIATELY after install — no need to revisit Settings.
+                $mailTransport = (string)($_POST['mail_transport'] ?? 'none');
+                if ($mailTransport === 'resend' || $mailTransport === 'smtp') {
+                    try {
+                        $primary = $mailTransport;
+                        $secondary = $primary === 'smtp' ? 'resend' : 'smtp';
+                        setSetting('mail_method', $primary);
+                        setSetting('mail_method_secondary', $secondary);
+                        setSetting('resend_enabled', $primary === 'resend' ? 'true' : 'false');
+                        setSetting('smtp_enabled', $primary === 'smtp' ? 'true' : 'false');
+
+                        if (isset($_POST['resend_api_key']) && trim((string)$_POST['resend_api_key']) !== '') {
+                            setSecretSetting('resend_api_key', trim((string)$_POST['resend_api_key']));
+                        }
+                        if (isset($_POST['resend_from_email'])) {
+                            setSetting('resend_from_email', trim((string)$_POST['resend_from_email']));
+                        }
+                        if (isset($_POST['resend_from_name'])) {
+                            setSetting('resend_from_name', trim((string)$_POST['resend_from_name']));
+                        }
+
+                        if (isset($_POST['smtp_host'])) {
+                            setSetting('smtp_host', trim((string)$_POST['smtp_host']));
+                        }
+                        if (isset($_POST['smtp_user'])) {
+                            setSetting('smtp_user', trim((string)$_POST['smtp_user']));
+                        }
+                        if (isset($_POST['smtp_pass']) && trim((string)$_POST['smtp_pass']) !== '') {
+                            setSecretSetting('smtp_pass', (string)$_POST['smtp_pass']);
+                        }
+                        if (isset($_POST['smtp_port'])) {
+                            setSetting('smtp_port', (string)(int)$_POST['smtp_port']);
+                        }
+                        if (isset($_POST['smtp_secure'])) {
+                            $sec = in_array((string)$_POST['smtp_secure'], ['tls', 'ssl', 'none'], true)
+                                ? (string)$_POST['smtp_secure'] : 'tls';
+                            setSetting('smtp_secure', $sec);
+                        }
+
+                        // The site owner should receive security notifications
+                        // (login alerts, failed-login alerts, IP bans).
+                        if ($adminEmail !== '') {
+                            setSetting('security_notify_emails', $adminEmail);
+                        }
+                    } catch (Throwable $e) { /* non-fatal — configurable later in Settings */ }
+                }
+
                 // ── Ensure upload and session dirs exist ───────────────
                 foreach ([$uploadBase, $uploadBase . '/headers', $uploadBase . '/devotional'] as $d) {
                     if (!is_dir($d)) @mkdir($d, 0777, true);
@@ -481,6 +531,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } catch (Exception $e) {}
                 $postTests['devotional_write'] = ['label'=>'Database write test', 'pass'=>$devWriteOk, 'detail'=>$devWriteOk ? 'Insert+Delete OK' : 'Failed'];
 
+                // Email transport configured check — shows which transport was
+                // saved at install (or that it was skipped, which is OK).
+                $mailConfigured = false;
+                $mailDetail = 'Skipped — configure later in Settings → Email';
+                if ($mailTransport === 'resend' && trim((string)($_POST['resend_api_key'] ?? '')) !== '') {
+                    $mailConfigured = true;
+                    $mailDetail = 'Resend — ' . trim((string)($_POST['resend_from_email'] ?? ''));
+                } elseif ($mailTransport === 'smtp' && trim((string)($_POST['smtp_host'] ?? '')) !== '') {
+                    $mailConfigured = true;
+                    $mailDetail = 'SMTP — ' . trim((string)($_POST['smtp_host'] ?? ''));
+                }
+                // Skipping email is a supported, default choice — it must not
+                // flip the install summary to "some checks need attention".
+                $postTests['mail_config'] = [
+                    'label'  => 'Email transport saved',
+                    'pass'   => $mailTransport === 'none' || $mailConfigured,
+                    'detail' => $mailDetail,
+                ];
+
                 $allPostPass = true;
                 foreach ($postTests as $pt) { if (!$pt['pass']) $allPostPass = false; }
 
@@ -567,6 +636,207 @@ if ($action === 'test_upload') {
         $results[$label] = $r;
     }
     echo json_encode(['success' => $allOk, 'results' => $results]);
+    exit;
+}
+
+// ── Standalone email senders (installer test — NO database required) ────────
+// These run before install.php has a DB config, so they can't use the app's
+// email engine (which reads settings from the DB). They implement the same
+// two transports directly: Resend via cURL, SMTP via a raw socket client.
+
+/** Send a test email via the Resend API using the entered key. */
+function installTestResend(string $apiKey, string $fromEmail, string $toEmail, string $subject, string $body): array
+{
+    $data = [
+        'from'    => $fromEmail,
+        'to'      => [$toEmail],
+        'subject' => $subject,
+        'text'    => $body,
+    ];
+    $ch = @curl_init('https://api.resend.com/emails');
+    if (!$ch) {
+        return ['success' => false, 'error' => 'cURL unavailable'];
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($data),
+        CURLOPT_HTTPHEADER     => ['Authorization: Bearer ' . $apiKey, 'Content-Type: application/json'],
+        CURLOPT_TIMEOUT        => 25,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = (string)curl_error($ch);
+    curl_close($ch);
+
+    if ($httpCode >= 200 && $httpCode < 300) {
+        return ['success' => true, 'method' => 'resend', 'error' => ''];
+    }
+    $detail = 'Resend HTTP ' . $httpCode . ($curlErr !== '' ? ' (' . $curlErr . ')' : '') . ' — ' . substr((string)$response, 0, 200);
+    return ['success' => false, 'method' => 'resend', 'error' => $detail];
+}
+
+/**
+ * Minimal raw SMTP client (fsockopen) for the installer test.
+ * Supports STARTTLS/SSL auth + AUTH LOGIN. Returns success + a human
+ * readable error. Never touches the database.
+ */
+function installTestSmtp(array $cfg, string $toEmail, string $subject, string $body): array
+{
+    $host   = trim((string)($cfg['host'] ?? ''));
+    $port   = (int)($cfg['port'] ?? 587);
+    $secure = (string)($cfg['secure'] ?? 'tls');
+    $user   = (string)($cfg['user'] ?? '');
+    $pass   = (string)($cfg['pass'] ?? '');
+    $from   = trim((string)($cfg['from'] ?? ''));
+
+    if ($host === '' || $from === '') {
+        return ['success' => false, 'method' => 'smtp', 'error' => 'SMTP host and From email are required.'];
+    }
+
+    $remote = ($secure === 'ssl' ? 'ssl://' : '') . $host;
+    $fp = @fsockopen($remote, $port, $errno, $errstr, 12);
+    if (!$fp) {
+        return ['success' => false, 'method' => 'smtp', 'error' => "Could not connect to $host:$port — $errstr ($errno)"];
+    }
+    stream_set_timeout($fp, 12);
+
+    $readReply = function () use ($fp): string {
+        $buf = '';
+        while (($line = fgets($fp, 515)) !== false) {
+            $buf .= $line;
+            // Multi-line replies end with "<code> <text>" (space after code).
+            if (isset($line[3]) && $line[3] === ' ') break;
+        }
+        return trim($buf);
+    };
+    $expect = function (string $prefix) use ($fp, $readReply): bool {
+        $reply = $readReply();
+        return str_starts_with($reply, $prefix);
+    };
+
+    // Greeting
+    if (!$expect('220')) {
+        fclose($fp);
+        return ['success' => false, 'method' => 'smtp', 'error' => 'No SMTP greeting (220) from ' . $host . '.'];
+    }
+    // EHLO
+    fwrite($fp, "EHLO daily-impact.local\r\n");
+    if (!$expect('250')) {
+        fclose($fp);
+        return ['success' => false, 'method' => 'smtp', 'error' => 'EHLO rejected by ' . $host . '.'];
+    }
+    // STARTTLS when requested
+    if ($secure === 'tls') {
+        fwrite($fp, "STARTTLS\r\n");
+        if (!$expect('220')) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'STARTTLS not supported/rejected by ' . $host . '. Try SSL or none.'];
+        }
+        if (!@stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'TLS handshake failed with ' . $host . '.'];
+        }
+        fwrite($fp, "EHLO daily-impact.local\r\n");
+        if (!$expect('250')) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'EHLO (after TLS) rejected by ' . $host . '.'];
+        }
+    }
+    // AUTH LOGIN when credentials provided
+    if ($user !== '') {
+        fwrite($fp, "AUTH LOGIN\r\n");
+        if (!$expect('334')) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'AUTH LOGIN not accepted by ' . $host . '.'];
+        }
+        fwrite($fp, base64_encode($user) . "\r\n");
+        if (!$expect('334')) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'SMTP username rejected by ' . $host . '.'];
+        }
+        fwrite($fp, base64_encode($pass) . "\r\n");
+        if (!$expect('235')) {
+            fclose($fp);
+            return ['success' => false, 'method' => 'smtp', 'error' => 'SMTP authentication failed (235 expected) — check username/password.'];
+        }
+    }
+    // Envelope + DATA
+    fwrite($fp, "MAIL FROM:<{$from}>\r\n");
+    if (!$expect('250')) {
+        fclose($fp);
+        return ['success' => false, 'method' => 'smtp', 'error' => 'MAIL FROM rejected by ' . $host . '.'];
+    }
+    fwrite($fp, "RCPT TO:<{$toEmail}>\r\n");
+    if (!$expect('250')) {
+        fclose($fp);
+        return ['success' => false, 'method' => 'smtp', 'error' => 'RCPT TO rejected — ' . $toEmail . ' not accepted by ' . $host . '.'];
+    }
+    fwrite($fp, "DATA\r\n");
+    if (!$expect('354')) {
+        fclose($fp);
+        return ['success' => false, 'method' => 'smtp', 'error' => 'DATA not accepted by ' . $host . '.'];
+    }
+    $msg = "Subject: {$subject}\r\nFrom: {$from}\r\nTo: {$toEmail}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n{$body}\r\n.\r\n";
+    fwrite($fp, $msg);
+    $sent = $expect('250');
+    fwrite($fp, "QUIT\r\n");
+    fclose($fp);
+
+    if (!$sent) {
+        return ['success' => false, 'method' => 'smtp', 'error' => 'Message not accepted by ' . $host . ' (expected 250 after DATA).'];
+    }
+    return ['success' => true, 'method' => 'smtp', 'error' => ''];
+}
+
+// ── AJAX: Test email from the installer form (runs BEFORE install) ─────────
+// The entered secrets (API key / SMTP password) are read from the POST BODY —
+// never the query string — so they don't land in Apache access logs.
+if ($action === 'test_email') {
+    header('Content-Type: application/json');
+    $in = $_POST;
+    $transport = (string)($in['transport'] ?? 'resend');
+    $toEmail   = trim((string)($in['to'] ?? ''));
+    $subject   = '✅ Test Email — ' . (string)($in['site'] ?? 'Daily Impact Devotional');
+    $body      = "This is a test email sent from the Daily Impact Devotional installer.\n\n"
+               . "Your email configuration is working — you can now use this transport\n"
+               . "for password resets, login alerts and donation receipts.\n\n"
+               . "Sent at: " . date('Y-m-d H:i:s');
+
+    if ($toEmail === '' || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
+        echo json_encode(['success' => false, 'message' => 'Enter a valid email address to send the test to.']);
+        exit;
+    }
+
+    if ($transport === 'smtp') {
+        $cfg = [
+            'host'   => (string)($in['smtp_host'] ?? ''),
+            'port'   => (int)($in['smtp_port'] ?? 587),
+            'secure' => in_array((string)($in['smtp_secure'] ?? 'tls'), ['tls', 'ssl', 'none'], true)
+                ? (string)$in['smtp_secure'] : 'tls',
+            'user'   => (string)($in['smtp_user'] ?? ''),
+            'pass'   => (string)($in['smtp_pass'] ?? ''),
+            'from'   => (string)($in['from'] ?? ''),
+        ];
+        $result = installTestSmtp($cfg, $toEmail, $subject, $body);
+    } else {
+        $apiKey = (string)($in['resend_api_key'] ?? '');
+        $from   = (string)($in['from'] ?? '');
+        if ($apiKey === '' || $from === '') {
+            $result = ['success' => false, 'method' => 'resend', 'error' => 'Resend API key and From email are required.'];
+        } else {
+            $result = installTestResend($apiKey, $from, $toEmail, $subject, $body);
+        }
+    }
+
+    echo json_encode([
+        'success' => $result['success'],
+        'method'  => $result['method'] ?? '',
+        'message' => $result['success']
+            ? '✅ Test email sent via ' . strtoupper($result['method']) . ' — check ' . $toEmail . ' (and spam).'
+            : '❌ ' . $result['error'],
+    ]);
     exit;
 }
 
@@ -762,6 +1032,23 @@ input.error { border-color: #f87171; }
 .btn-ghost:hover { color: #e2e8f0; }
 .btn-group { display: flex; justify-content: space-between; margin-top: 1.5rem; gap: 0.75rem; }
 
+/* Small buttons — used on the post-install results page so the action row
+   (Homepage · Admin Login · Diagnostics · Delete install.php) fits on one line. */
+.btn-sm {
+    padding: 0.45rem 0.9rem;
+    font-size: 0.78rem;
+    border-radius: 6px;
+    gap: 0.35rem;
+}
+.flex-sm {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
+
 /* ── Messages ── */
 .error-box {
     background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3);
@@ -826,15 +1113,13 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
         $appRoot = $scriptDir === '/' ? '' : rtrim(dirname($scriptDir), '/');
         $backendUrl = $scriptDir === '/' ? '' : $scriptDir;
         ?>
-        <div class="flex">
+        <div class="flex-sm">
             <a href="<?= $appRoot ?>/" class="btn btn-primary btn-sm">🏠 Homepage</a>
             <a href="<?= $appRoot ?>/admin/login" class="btn btn-success btn-sm">🔐 Admin Login</a>
             <a href="<?= $backendUrl ?>/debug.php" class="btn btn-outline btn-sm">🩺 Diagnostics</a>
+            <button type="button" class="btn btn-danger btn-sm" onclick="deleteInstaller(this)">🗑️ Delete install.php</button>
         </div>
-        <div class="text-center mt-3">
-            <button type="button" class="btn btn-danger" onclick="deleteInstaller(this)">🗑️ Delete install.php Now</button>
-            <div id="deleteInstallerMsg"></div>
-        </div>
+        <div class="text-center mt-3" id="deleteInstallerMsg"></div>
     </div>
 
 <?php elseif ($alreadyInstalled): ?>
@@ -887,6 +1172,8 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
             <div class="step-dot" data-step="3">3</div>
             <div class="step-line" data-step="3-4"></div>
             <div class="step-dot" data-step="4">4</div>
+            <div class="step-line" data-step="4-5"></div>
+            <div class="step-dot" data-step="5">5</div>
         </div>
 
         <form id="installForm" method="POST">
@@ -954,13 +1241,121 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
 
                 <div class="btn-group">
                     <button type="button" class="btn btn-ghost" onclick="goStep(1)">← Back</button>
-                    <button type="button" class="btn btn-primary" onclick="goStep(3)">Continue → Admin Account</button>
+                    <button type="button" class="btn btn-primary" onclick="goStep(3)">Continue → Email Setup</button>
                 </div>
             </div>
 
-            <!-- ══ STEP 3: Admin Account ══ -->
+            <!-- ══ STEP 3: Email Configuration (optional) ══ -->
             <div class="step" data-step="3">
-                <div class="section-title">👤 Step 3: Admin Account</div>
+                <div class="section-title">📧 Step 3: Email Configuration <span style="color:#64748b;text-transform:none;letter-spacing:0;font-weight:600;">(optional)</span></div>
+                <p style="color:#94a3b8; font-size:0.8rem; margin-bottom:1rem; line-height:1.6;">
+                    Set up email now so password-reset links, login alerts and donation receipts can be sent
+                    <strong style="color:#e2e8f0;">immediately after install</strong> — even before your first login.
+                    You can skip this and configure it later under <em>Settings → Email</em>.
+                </p>
+
+                <div class="form-group">
+                    <label>Transport Method</label>
+                    <div style="display:flex; gap:0.6rem; flex-wrap:wrap;">
+                        <label style="display:flex; align-items:center; gap:0.4rem; padding:0.5rem 0.9rem; border:1px solid rgba(255,255,255,0.1); border-radius:8px; cursor:pointer; font-size:0.85rem; font-weight:600; margin:0;">
+                            <input type="radio" name="mail_transport" value="none" <?= ($_POST['mail_transport'] ?? 'none') === 'none' ? 'checked' : '' ?> onchange="toggleMailTransport(this.value)"> Skip
+                        </label>
+                        <label style="display:flex; align-items:center; gap:0.4rem; padding:0.5rem 0.9rem; border:1px solid rgba(255,255,255,0.1); border-radius:8px; cursor:pointer; font-size:0.85rem; font-weight:600; margin:0;">
+                            <input type="radio" name="mail_transport" value="resend" <?= ($_POST['mail_transport'] ?? '') === 'resend' ? 'checked' : '' ?> onchange="toggleMailTransport(this.value)"> Resend
+                        </label>
+                        <label style="display:flex; align-items:center; gap:0.4rem; padding:0.5rem 0.9rem; border:1px solid rgba(255,255,255,0.1); border-radius:8px; cursor:pointer; font-size:0.85rem; font-weight:600; margin:0;">
+                            <input type="radio" name="mail_transport" value="smtp" <?= ($_POST['mail_transport'] ?? '') === 'smtp' ? 'checked' : '' ?> onchange="toggleMailTransport(this.value)"> SMTP
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Resend fields -->
+                <div id="mailFieldsResend" style="display:none;">
+                    <div class="form-group">
+                        <label>Resend API Key</label>
+                        <div class="password-wrapper">
+                            <input type="password" name="resend_api_key" id="resend_api_key" placeholder="re_..." autocomplete="off">
+                            <button type="button" class="password-toggle" onclick="togglePw('resend_api_key','resendKeyEye')" aria-label="Toggle API key"><span id="resendKeyEye">👁️</span></button>
+                        </div>
+                    </div>
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>From Email</label>
+                            <input type="email" name="resend_from_email" placeholder="noreply@yourdomain.com">
+                        </div>
+                        <div class="form-group">
+                            <label>From Name</label>
+                            <input type="text" name="resend_from_name" value="Daily Impact Devotional">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SMTP fields -->
+                <div id="mailFieldsSmtp" style="display:none;">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>SMTP Host</label>
+                            <input type="text" name="smtp_host" placeholder="smtp.yourhost.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Port</label>
+                            <input type="number" name="smtp_port" value="587">
+                        </div>
+                    </div>
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" name="smtp_user" placeholder="SMTP username" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <div class="password-wrapper">
+                                <input type="password" name="smtp_pass" placeholder="SMTP password" autocomplete="off">
+                                <button type="button" class="password-toggle" onclick="togglePw('smtp_pass','smtpPassEye')" aria-label="Toggle SMTP password"><span id="smtpPassEye">👁️</span></button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Encryption</label>
+                        <select name="smtp_secure" style="width:100%; padding:0.65rem 0.9rem; border-radius:8px; border:1px solid rgba(255,255,255,0.1); background:rgba(15,23,42,0.6); color:#f8fafc; font-size:0.9rem;">
+                            <option value="tls" selected>TLS (STARTTLS — usually port 587)</option>
+                            <option value="ssl">SSL (usually port 465)</option>
+                            <option value="none">None (plain, port 25/587)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>From Email</label>
+                        <input type="email" name="smtp_from_email" placeholder="noreply@yourdomain.com">
+                    </div>
+                </div>
+
+                <!-- Test email interface -->
+                <div id="mailTestBox" style="display:none;">
+                    <hr style="margin:1rem 0;">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>Send test email to</label>
+                            <input type="email" id="mail_test_to" placeholder="you@example.com">
+                        </div>
+                        <div class="form-group" style="display:flex; align-items:flex-end;">
+                            <button type="button" class="btn-test" onclick="testEmail(this)" style="width:100%;">📧 Send Test Email</button>
+                        </div>
+                    </div>
+                    <div id="mailTestResult" class="test-result"></div>
+                    <p style="color:#64748b; font-size:0.72rem; margin-top:0.5rem;">
+                        Sends a real test message through the transport above — your configuration must be valid before install completes.
+                    </p>
+                </div>
+
+                <div class="btn-group">
+                    <button type="button" class="btn btn-ghost" onclick="goStep(2)">← Back</button>
+                    <button type="button" class="btn btn-primary" onclick="goStep(4)">Continue → Admin Account</button>
+                </div>
+            </div>
+
+            <!-- ══ STEP 4: Admin Account ══ -->
+            <div class="step" data-step="4">
+                <div class="section-title">👤 Step 4: Admin Account</div>
                 <div class="form-group">
                     <label>Admin Email</label>
                     <input type="email" name="admin_email" id="admin_email" required
@@ -997,14 +1392,14 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
                     </small>
                 </div>
                 <div class="btn-group">
-                    <button type="button" class="btn btn-ghost" onclick="goStep(2)">← Back</button>
-                    <button type="button" class="btn btn-primary" onclick="goStep(4)">Review → Confirm</button>
+                    <button type="button" class="btn btn-ghost" onclick="goStep(3)">← Back</button>
+                    <button type="button" class="btn btn-primary" onclick="goStep(5)">Review → Confirm</button>
                 </div>
             </div>
 
-            <!-- ══ STEP 4: Review & Confirm ══ -->
-            <div class="step" data-step="4">
-                <div class="section-title">✅ Step 4: Review & Install</div>
+            <!-- ══ STEP 5: Review & Confirm ══ -->
+            <div class="step" data-step="5">
+                <div class="section-title">✅ Step 5: Review & Install</div>
                 <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:1rem;">Please review your settings before installation.</p>
                 <table class="review-table">
                     <tr><td>Database Host</td><td id="review_host">localhost</td></tr>
@@ -1013,6 +1408,7 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
                     <tr><td>Admin Email</td><td id="review_email">—</td></tr>
                     <tr><td>Admin Name</td><td id="review_name_field">Admin</td></tr>
                     <tr><td>Site URL</td><td id="review_site_url">—</td></tr>
+                    <tr><td>Email Transport</td><td id="review_mail_transport">Skip (optional)</td></tr>
                     <tr><td>Uploads Directory</td><td><?= htmlspecialchars($uploadBase) ?></td></tr>
                 </table>
 
@@ -1021,7 +1417,7 @@ code { background: rgba(15,23,42,0.6); padding: 0.15rem 0.4rem; border-radius: 4
                 <?php endif; ?>
 
                 <div class="btn-group">
-                    <button type="button" class="btn btn-ghost" onclick="goStep(3)">← Back</button>
+                    <button type="button" class="btn btn-ghost" onclick="goStep(4)">← Back</button>
                     <button type="button" class="btn btn-success" id="installBtn" onclick="startInstall(this)">
                         ⚡ Install Now
                     </button>
@@ -1098,6 +1494,70 @@ async function testDB(btn) {
     } catch (e) {
         result.className = 'test-result show fail';
         result.innerHTML = '\u274C Could not reach server: ' + e.message;
+    }
+    btn.disabled = false;
+}
+
+// ── Email transport: show/hide fields by selected method ──
+function toggleMailTransport(value) {
+    document.getElementById('mailFieldsResend').style.display = value === 'resend' ? 'block' : 'none';
+    document.getElementById('mailFieldsSmtp').style.display = value === 'smtp' ? 'block' : 'none';
+    document.getElementById('mailTestBox').style.display = value === 'none' ? 'none' : 'block';
+}
+
+// ── Test email from the installer form (before install completes) ──
+async function testEmail(btn) {
+    const result = document.getElementById('mailTestResult');
+    const transportEl = document.querySelector('input[name="mail_transport"]:checked');
+    const transport = transportEl ? transportEl.value : 'none';
+    const to = document.getElementById('mail_test_to').value.trim();
+
+    if (transport === 'none') { return; }
+    if (!to.includes('@')) {
+        result.className = 'test-result show fail';
+        result.innerHTML = '❌ Enter a valid email address to send the test to.';
+        return;
+    }
+
+    result.className = 'test-result show loading';
+    result.innerHTML = '⏳ Sending test email...';
+    btn.disabled = true;
+
+    const site = document.getElementById('site_url').value || window.location.host;
+    const params = new URLSearchParams({
+        action: 'test_email',
+        transport: transport,
+        to: to,
+        site: site,
+        from: transport === 'smtp'
+            ? (document.querySelector('[name="smtp_from_email"]').value || '')
+            : (document.querySelector('[name="resend_from_email"]').value || ''),
+        resend_api_key: document.querySelector('[name="resend_api_key"]').value || '',
+        smtp_host: document.querySelector('[name="smtp_host"]').value || '',
+        smtp_port: document.querySelector('[name="smtp_port"]').value || '587',
+        smtp_secure: document.querySelector('[name="smtp_secure"]').value || 'tls',
+        smtp_user: document.querySelector('[name="smtp_user"]').value || '',
+        smtp_pass: document.querySelector('[name="smtp_pass"]').value || '',
+    });
+
+    try {
+        // POST the secrets in the body — never the URL (avoid access-log leaks).
+        const res = await fetch('?action=test_email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (json.success) {
+            result.className = 'test-result show pass';
+            result.innerHTML = json.message || '✅ Test email sent!';
+        } else {
+            result.className = 'test-result show fail';
+            result.innerHTML = json.message || '❌ Test failed. Check your configuration.';
+        }
+    } catch (e) {
+        result.className = 'test-result show fail';
+        result.innerHTML = '❌ Could not reach server: ' + e.message;
     }
     btn.disabled = false;
 }
@@ -1348,11 +1808,11 @@ function renderResults(data) {
         });
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-    // ── Validation on step 3 → 4 ──
+    // ── Validation on step 4 → 5 ──
     const oldGoStep = goStep;
     window.goStep = function(n) {
-        // Validate admin fields when going to step 4
-        if (n === 4) {
+        // Validate admin fields when going to step 5 (Review)
+        if (n === 5) {
             const pass = document.getElementById('admin_password');
             const dbUser = document.querySelector('[name="db_user"]');
             let errorStep = 0;
@@ -1362,7 +1822,7 @@ function renderResults(data) {
 
             if (!pass.value || pass.value.length < 6) {
                 pass.classList.add('error');
-                if (errorStep === 0 || errorStep > 3) errorStep = 3;
+                if (errorStep === 0 || errorStep > 4) errorStep = 4;
             } else { pass.classList.remove('error'); }
 
             if (errorStep > 0) { oldGoStep(errorStep); return; }
@@ -1374,6 +1834,10 @@ function renderResults(data) {
             document.getElementById('review_email').textContent = document.getElementById('admin_email').value || '(empty)';
             document.getElementById('review_name_field').textContent = document.querySelector('[name="admin_name"]').value || 'Admin';
             document.getElementById('review_site_url').textContent = document.querySelector('[name="site_url"]').value || '(auto)';
+            const transportEl = document.querySelector('input[name="mail_transport"]:checked');
+            const transport = transportEl ? transportEl.value : 'none';
+            document.getElementById('review_mail_transport').textContent =
+                transport === 'resend' ? 'Resend' : transport === 'smtp' ? 'SMTP' : 'Skip (optional)';
         }
         oldGoStep(n);
     };
@@ -1382,7 +1846,7 @@ function renderResults(data) {
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') {
             const activeStep = document.querySelector('.step.active');
-            if (activeStep && parseInt(activeStep.dataset.step) < 4) {
+            if (activeStep && parseInt(activeStep.dataset.step) < 5) {
                 e.preventDefault();
                 // Don't advance — user must click the button
             }
@@ -1400,7 +1864,7 @@ function renderResults(data) {
             if (errMsg.includes('database') || errMsg.includes('Connection')) {
                 goStep(2);
             } else if (errMsg.includes('password') || errMsg.includes('email')) {
-                goStep(3);
+                goStep(4);
             } else {
                 goStep(1);
             }
