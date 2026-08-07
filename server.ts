@@ -324,6 +324,8 @@ app.get("/api/settings", (_req: Request, res: Response) => {
     admin_timezone: "Africa/Lagos",
     telegram_channel_link: "https://t.me/dailyimpactdevotional",
     cron_secret_key: "",
+    cron_last_run: "",
+    cron_last_result: "",
   });
   res.json(data);
 });
@@ -1884,6 +1886,16 @@ app.get("/api/telegram/scheduled", (req: Request, res: Response) => {
     .filter(e => e.scheduledYear === year && e.scheduledDate.toLowerCase().startsWith(monthLower + " "))
     .sort((a, b) => a.scheduledDate.localeCompare(b.scheduledDate));
   res.json(rows);
+});
+
+// POST run-cron — run one scheduler tick NOW (admin test; mirrors backend)
+app.post("/api/telegram/run-cron", (_req: Request, res: Response) => {
+  const settings = readJson<Record<string, string>>(SETTINGS_FILE, {});
+  if (settings.telegram_enabled !== "true") {
+    res.json({ success: false, posted: 0, titles: [], message: "Telegram posting is disabled. Turn on the Service Active toggle in Telegram settings.", skipped: false, disabled: true, unconfigured: false });
+    return;
+  }
+  res.json({ success: true, posted: 0, titles: [], message: "No due scheduled posts at this time. Skipping.", skipped: true, disabled: false, unconfigured: false });
 });
 
 // POST schedule one or more devotionals to drop on their own date at postTime

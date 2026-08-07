@@ -32,6 +32,8 @@ switch ($method) {
             'telegram_bot_token'    => '',
             'telegram_channel_id'   => '',
             'cron_secret_key'       => '',
+            'cron_last_run'         => '',
+            'cron_last_result'      => '',
             'telegram_footer_text'  => 'Join our Telegram channel for daily impact! 📖🔥',
             'notify_email'          => '',
             'donation_notify_emails'=> '',

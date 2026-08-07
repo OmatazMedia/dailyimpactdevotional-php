@@ -23,6 +23,10 @@
  *  - Legacy fallback: if nothing is scheduled today but the old
  *    'telegram_schedule_mode=scheduled' daily slot applies, today's devotional
  *    is posted once at the configured time (existing behaviour preserved).
+ *
+ * The tick logic lives in tgRunCronTick() (telegram.php), shared with the
+ * Dashboard's "Run cron now (test)" button. Each REAL cron run records
+ * cron_last_run / cron_last_result so the Telegram page can show freshness.
  */
 
 require_once __DIR__ . '/../config/db.php';
@@ -30,7 +34,7 @@ require_once __DIR__ . '/tg-schedule.php';
 sendCorsHeaders();
 
 // Load Telegram helper functions (getDateInTz, resolveImageUrl, sendTelegram*,
-// buildDevotionalBody).
+// buildDevotionalBody, tgRunCronTick).
 require_once __DIR__ . '/telegram.php';
 
 // HTTP callers must use GET; CLI (cPanel `php backend/api/telegram-cron.php`)
@@ -54,197 +58,19 @@ if (php_sapi_name() !== 'cli') {
     }
 }
 
-// Check if Telegram is enabled
-if (($settings['telegram_enabled'] ?? 'false') !== 'true') {
-    jsonResponse(['success' => false, 'message' => 'Telegram posting is disabled']);
-}
+// Run one full tick (the same logic the Dashboard "Run now (test)" uses).
+$result = tgRunCronTick();
 
-$botToken  = $settings['telegram_bot_token'] ?? '';
-$channelId = $settings['telegram_channel_id'] ?? '';
-$postTime  = $settings['telegram_post_time'] ?? '06:00';
-$footerText = $settings['telegram_footer_text'] ?? 'Join our Telegram channel for daily impact! 📖🔥';
-$tz = $settings['admin_timezone'] ?? 'Africa/Lagos';
+// Record this run so the Telegram page can show "last cron run" freshness.
+// Only the REAL cron writes these — a manual dashboard test must not mask a
+// dead cron job.
+setSetting('cron_last_run', date('c'));
+setSetting('cron_last_result', mb_substr((string)($result['message'] ?? ''), 0, 250));
 
-if (empty($botToken) || empty($channelId)) {
-    jsonResponse(['success' => false, 'message' => 'Bot token or channel ID not configured']);
-}
-
-// Get current time in admin timezone
-$now = getDateInTz($tz);
-$currentMinute = $now['hour'] * 60 + $now['minute'];
-
-// ─── Pass 1: deliver due per-devotional scheduled rows ───────────────────────
-// Every telegram_log row whose scheduled_date is TODAY and whose post_time has
-// been reached (with a 120-minute grace so a slightly-delayed cron tick still
-// catches it) gets posted, then marked 'sent'.
-$stmt = $pdo->prepare(
-    "SELECT * FROM telegram_log
-     WHERE status = 'scheduled'
-       AND scheduled_year = ?
-       AND LOWER(scheduled_date) LIKE LOWER(?)"
-);
-// Match the month only — the exact day is compared numerically below. Dates
-// are stored zero-padded ("July 02"), so a "July 2%" prefix would both miss
-// today's devotional and wrongly grab "July 20".
-$stmt->execute([$now['year'], $now['month'] . ' %']);
-$dueRows = $stmt->fetchAll();
-
-$posted = 0;
-$postedIds = [];
-$delivered = [];
-
-foreach ($dueRows as $row) {
-    // Exact-date guard (numeric day, not prefix): "July 02" must match only
-    // July 2 — never "July 20".
-    $dateParts = explode(' ', (string)($row['scheduled_date'] ?? ''));
-    if (count($dateParts) !== 2) continue;
-    if (strtolower($dateParts[0]) !== strtolower($now['month'])) continue;
-    if ((int)$dateParts[1] !== $now['day']) continue;
-
-    // Parse the row's post_time (e.g. "06:00")
-    list($ph, $pm) = array_pad(explode(':', (string)($row['post_time'] ?? $postTime)), 2, '0');
-    $rowMinute = (int)$ph * 60 + (int)$pm;
-
-    // Not due yet → skip (a later tick this same day will pick it up)
-    if ($currentMinute < $rowMinute) continue;
-    // Grace window: never post a row more than 120 min after its slot if the
-    // cron was down — avoids flooding the channel with hours-old posts. Mark
-    // it skipped so the Dashboard doesn't keep counting it as pending.
-    if ($currentMinute - $rowMinute > 120) {
-        $pdo->prepare("UPDATE telegram_log SET status='skipped', error='Missed schedule window (>120 min late)' WHERE id = ?")
-            ->execute([$row['id']]);
-        continue;
-    }
-
-    // Load the devotional
-    $devStmt = $pdo->prepare("SELECT * FROM devotionals WHERE id = ?");
-    $devStmt->execute([$row['devotional_id']]);
-    $dev = $devStmt->fetch();
-    if (!$dev) {
-        // Devotional was deleted — mark row skipped so it stops being retried.
-        $pdo->prepare("UPDATE telegram_log SET status='skipped', error='Devotional no longer exists' WHERE id = ?")
-            ->execute([$row['id']]);
-        continue;
-    }
-
-    $imageUrl = resolveImageUrl($dev);
-    $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
-
-    $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
-    // Body starts at the Scripture section; the date + title header is only
-    // re-added if the photo (which carried them in its caption) failed to post.
-    $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
-    $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
-
-    $finalSuccess = $textResult['success'] || $photoResult['success'];
-    $messageId = $textResult['messageId'] ?? $photoResult['messageId'] ?? null;
-    $error = $textResult['error'] ?? $photoResult['error'] ?? null;
-
-    // Update the existing row (preserves the historical record + id)
-    $pdo->prepare(
-        "UPDATE telegram_log
-         SET status = ?, sent_at = NOW(), telegram_message_id = ?, error = ?
-         WHERE id = ?"
-    )->execute([$finalSuccess ? 'sent' : 'failed', $messageId, $error, $row['id']]);
-
-    if ($finalSuccess) {
-        $posted++;
-        $postedIds[] = $dev['id'];
-        $delivered[] = $dev['title'];
-    }
-}
-
-// ─── Pass 2: legacy daily fallback ───────────────────────────────────────────
-// Only when nothing due was delivered AND the classic 'scheduled' mode is on:
-// post today's devotional once at the configured slot (old behaviour).
-if ($posted === 0 && ($settings['telegram_schedule_mode'] ?? 'scheduled') === 'scheduled') {
-    // Only fire if the current minute matches the configured post time
-    list($ph, $pm) = array_pad(explode(':', $postTime), 2, '0');
-    $scheduledMinute = (int)$ph * 60 + (int)$pm;
-
-    if ($currentMinute === $scheduledMinute) {
-        // Check if already sent today — compare against the ADMIN timezone's
-        // date (CURDATE() would use the MySQL server's timezone instead).
-        $todayDate = (new DateTime('now', new DateTimeZone($tz)))->format('Y-m-d');
-        $stmt = $pdo->prepare(
-            "SELECT COUNT(*) FROM telegram_log
-             WHERE status = 'sent'
-             AND DATE(sent_at) = ?"
-        );
-        $stmt->execute([$todayDate]);
-        $alreadySentToday = $stmt->fetchColumn() > 0;
-
-        if (!$alreadySentToday) {
-            // Find today's devotional (numeric day match — stored dates are
-            // zero-padded, e.g. "July 02", so a prefix pattern won't work)
-            $stmt = $pdo->prepare(
-                "SELECT * FROM devotionals
-                 WHERE LOWER(date) LIKE LOWER(?) AND year = ?"
-            );
-            $stmt->execute([$now['month'] . ' %', $now['year']]);
-            $dev = null;
-            foreach ($stmt->fetchAll() as $cand) {
-                $parts = explode(' ', (string)($cand['date'] ?? ''));
-                if (count($parts) === 2
-                    && strtolower($parts[0]) === strtolower($now['month'])
-                    && (int)$parts[1] === $now['day']) {
-                    $dev = $cand;
-                    break;
-                }
-            }
-
-            if ($dev) {
-                $imageUrl = resolveImageUrl($dev);
-                $photoCaption = "<i>" . tgEscape($dev['date'] . ', ' . $dev['year']) . "</i>\n\n<b>" . tgEscape(tgUpper($dev['title'])) . "</b>";
-
-                $photoResult = sendTelegramPhoto($botToken, $channelId, $imageUrl, $photoCaption);
-                // Body starts at the Scripture section; the date + title header
-                // is only re-added if the photo failed to post.
-                $bodyText = buildDevotionalBody($dev, $footerText, $photoResult['success']);
-                $textResult  = sendTelegramMessage($botToken, $channelId, $bodyText);
-
-                $finalSuccess = $textResult['success'] || $photoResult['success'];
-                $messageId = $textResult['messageId'] ?? $photoResult['messageId'] ?? null;
-                $error = $textResult['error'] ?? $photoResult['error'] ?? null;
-
-                $logId = generateId();
-                $stmt = $pdo->prepare(
-                    "INSERT INTO telegram_log (id, devotional_id, devotional_title, scheduled_date, scheduled_year, post_time, status, sent_at, telegram_message_id, error)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)"
-                );
-                $stmt->execute([
-                    $logId,
-                    $dev['id'],
-                    $dev['title'],
-                    $dev['date'],
-                    $dev['year'],
-                    $postTime,
-                    $finalSuccess ? 'sent' : 'failed',
-                    $messageId,
-                    $error,
-                ]);
-
-                if ($finalSuccess) {
-                    $posted++;
-                    $delivered[] = $dev['title'];
-                }
-            }
-        }
-    }
-}
-
-if ($posted > 0) {
-    jsonResponse([
-        'success'   => true,
-        'posted'    => $posted,
-        'titles'    => $delivered,
-        'message'   => 'Posted ' . $posted . ' devotional(s) to Telegram.',
-    ]);
-} else {
-    jsonResponse([
-        'success' => true,
-        'posted'  => 0,
-        'message' => 'No due scheduled posts at this time. Skipping.',
-        'skipped' => true,
-    ]);
-}
+jsonResponse([
+    'success' => $result['success'] ?? false,
+    'posted'  => $result['posted'] ?? 0,
+    'titles'  => $result['titles'] ?? [],
+    'message' => $result['message'] ?? '',
+    'skipped' => !empty($result['skipped']),
+]);

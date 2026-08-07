@@ -43,7 +43,8 @@ import {
   Copy,
   ShieldOff,
   AlertCircle,
-  Smartphone
+  Smartphone,
+  Play
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import OtpCodeInput from "./OtpCodeInput";
@@ -594,6 +595,11 @@ export default function Dashboard({
   // Cron Secret Key — protects the HTTP cron URL (CLI cron ignores it).
   const [telegramCronKey, setTelegramCronKey] = useState("");
   const [telegramShowCronKey, setTelegramShowCronKey] = useState(false);
+  // Cron freshness (written by the real cron) + last admin run-now test.
+  const [cronLastRun, setCronLastRun] = useState("");
+  const [cronLastResult, setCronLastResult] = useState("");
+  const [isRunningCron, setIsRunningCron] = useState(false);
+  const [cronRunResult, setCronRunResult] = useState<{ success: boolean; posted?: number; titles?: string[]; message?: string; skipped?: boolean } | null>(null);
   const [telegramVerifyResult, setTelegramVerifyResult] = useState<{ success: boolean; botName?: string; channelTitle?: string; error?: string } | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [selectedTestDevId, setSelectedTestDevId] = useState("");
@@ -754,6 +760,8 @@ export default function Dashboard({
     setTelegramBotToken(pick("telegram_bot_token"));
     setTelegramChannelId(pick("telegram_channel_id"));
     setTelegramCronKey(pick("cron_secret_key"));
+    setCronLastRun(pick("cron_last_run"));
+    setCronLastResult(pick("cron_last_result"));
     setTelegramEnabled(pick("telegram_enabled", "false") === "true");
     setTelegramPostTime(pick("telegram_post_time", "06:00"));
     setTelegramFooterText(pick("telegram_footer_text", "Join our Telegram channel for daily impact words!"));
@@ -780,6 +788,16 @@ export default function Dashboard({
   useEffect(() => {
     if (activeTab === "telegram-integration") {
       loadTelegramSchedules(tgSchedMonth, tgSchedYear);
+      // Refresh cron freshness whenever the Telegram tab opens so the chip
+      // reflects the latest real cron run without a full page reload.
+      fetch(`${API_BASE}/settings.php`)
+        .then(r => (r.ok ? r.json() : null))
+        .then((d: Record<string, string> | null) => {
+          if (!d) return;
+          if (d.cron_last_run !== undefined) setCronLastRun(d.cron_last_run);
+          if (d.cron_last_result !== undefined) setCronLastResult(d.cron_last_result);
+        })
+        .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, tgSchedMonth, tgSchedYear]);
@@ -962,6 +980,28 @@ export default function Dashboard({
     } finally {
       setIsSendingTestEmail(false);
     }
+  };
+
+  // Run one scheduler tick NOW (admin test) — same logic the cron runs.
+  const handleRunCronNow = async () => {
+    setIsRunningCron(true);
+    setCronRunResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/telegram.php?action=run-cron`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const json = res.ok
+        ? await res.json() as { success: boolean; posted?: number; titles?: string[]; message?: string; skipped?: boolean }
+        : { success: false, message: `Cron endpoint returned ${res.status}` };
+      setCronRunResult(json);
+      showToast(json.success ? json.message || "Cron tick ran." : json.message || "Cron tick could not run.", json.success ? "success" : "info");
+    } catch {
+      setCronRunResult({ success: false, message: "API server not running. Start with: npm run server" });
+      showToast("API server not running. Start with: npm run server", "error");
+    }
+    setIsRunningCron(false);
   };
 
   // Random 32-char key that protects the HTTP cron URL (CLI cron ignores it).
@@ -5417,6 +5457,50 @@ export default function Dashboard({
                         </button>
                       </div>
                     </div>
+                  </div>
+
+                  {/* Cron health strip — last real cron run + admin run-now test */}
+                  <div className={`rounded-2xl border px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 ${
+                    isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
+                  }`}>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5" /> Cron health
+                      </p>
+                      {(() => {
+                        const ms = cronLastRun ? new Date(cronLastRun).getTime() : NaN;
+                        const mins = Number.isFinite(ms) ? Math.max(0, Math.floor((Date.now() - ms) / 60000)) : null;
+                        const fresh = mins !== null && mins <= 15;
+                        const recent = mins !== null && mins <= 120;
+                        return (
+                          <p className={`text-xs font-bold mt-0.5 ${fresh ? "text-emerald-500" : recent ? "text-amber-500" : "text-rose-500"}`}>
+                            {mins === null
+                              ? "Cron has never run — set it up via Cron Setup, then press \"Run cron now (test)\" to verify."
+                              : fresh
+                                ? `● Running normally — last run ${mins === 0 ? "just now" : `${mins} min ago`}`
+                                : recent
+                                  ? `● Last run ${mins} min ago — ${cronLastResult || "no detail recorded"}`
+                                  : `● Cron may NOT be running — last run ${mins} min ago. ${cronLastResult || ""}`}
+                          </p>
+                        );
+                      })()}
+                      {cronRunResult && (
+                        <p className={`text-[11px] font-bold mt-1 ${cronRunResult.success ? "text-emerald-500" : "text-rose-500"}`}>
+                          {cronRunResult.success
+                            ? `✅ Test: ${cronRunResult.message || "Tick ran."}${cronRunResult.titles?.length ? ` — ${cronRunResult.titles.join(", ")}` : ""}`
+                            : `⚠️ Test: ${cronRunResult.message || "Tick could not run."}`}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isRunningCron}
+                      onClick={handleRunCronNow}
+                      className="shrink-0 inline-flex items-center gap-1.5 py-2 px-4 rounded-xl bg-teal-brand text-white text-[10px] font-black uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-50"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      {isRunningCron ? "Running tick…" : "Run cron now (test)"}
+                    </button>
                   </div>
 
                   {/* Config & Simulation Grid */}
