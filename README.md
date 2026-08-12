@@ -4,6 +4,9 @@
 > Contact: **Johnson Toluwani** · hello@omatazmedia.com.ng · +234 9024599289, +234 7037373304 · [WhatsApp](https://wa.me/message/M3QUHNVONY6NK1)
 > [Facebook](https://facebook.com/omatazmedia) · [Instagram](https://instagram.com/omatazmedia) · [X](https://x.com/omatazmedia) · [YouTube](https://youtube.com/@omatazmedia) · [GitHub](https://github.com/omatazmedia)
 
+> 📌 **Canonical repository:** all commits for this project go to
+> **https://github.com/OmatazMedia/dailyimpactdevotional-php** (`main` branch).
+
 ---
 
 A full-stack daily devotional platform by **Dr. Andy Osakwe / Andrew Osakwe Ministries International** — publish scripture-based devotionals, broadcast them automatically to a Telegram channel with their banner artwork, collect donations in multiple currencies, and give readers a beautiful installable PWA reading experience.
